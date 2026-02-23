@@ -1,0 +1,41 @@
+# 传记生成器配置文件
+
+# 模型配置 - 使用Kimi，无需API密钥
+model:
+  provider: kimi
+  api_key: ""  # 不需要
+  base_url: null
+  model: kimi
+  max_tokens: 4000
+  temperature: 0.7
+  top_p: 0.9
+
+# 生成参数
+generation:
+  target_length: 10000   # 默认1万字（测试用），正式用100000
+  total_chapters: 5      # 默认5章（测试用），正式用25
+  sections_per_chapter: 4
+  words_per_section: 500
+  style: literary
+  
+# 路径配置
+paths:
+  interview_dir: ./interviews
+  output_dir: ./output
+  vector_db_dir: ./.vector_db
+  cache_dir: ./.cache
+
+# 向量数据库
+vector_db:
+  collection_name: biography_materials
+  embedding_model: default  # 使用chroma默认embedding
+  chunk_size: 500
+  chunk_overlap: 100
+
+# 重试与并发
+retry:
+  max_attempts: 3
+  backoff_factor: 2
+  
+concurrency:
+  max_workers: 1  # 使用Kimi时单线程
