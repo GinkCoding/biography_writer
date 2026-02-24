@@ -25,12 +25,42 @@ paths:
   vector_db_dir: ./.vector_db
   cache_dir: ./.cache
 
-# 向量数据库
+# 向量数据库 & Embedding配置
+embedding:
+  # Embedding提供器优先级（按顺序尝试）
+  # 可选值: siliconflow, sentence_transformer, openai, tfidf
+  priority:
+    - siliconflow      # 推荐：国内API，中文效果好，无需本地下载模型
+    - sentence_transformer  # 本地运行，无需API
+    - openai           # 国际API
+    - tfidf            # 轻量级备选
+  
+  # 硅基流动配置（推荐）
+  # 官网: https://siliconflow.cn
+  # 注册后可获得免费Token额度
+  siliconflow_api_key: ""  # 从 https://siliconflow.cn 获取API密钥
+  siliconflow_model: "BAAI/bge-large-zh-v1.5"  # 推荐模型：中文效果优秀
+  # 其他可选模型:
+  # - "BAAI/bge-m3" (支持8192长度，多语言)
+  # - "netease-youdao/bce-embedding-base_v1" (有道开源)
+  # - "Pro/BAAI/bge-m3" (专业版)
+  
+  # SentenceTransformer配置（本地模型）
+  # 首次使用时会自动下载模型（约200MB-1GB）
+  model: "BAAI/bge-small-zh-v1.5"  # 轻量级中文模型
+  # 其他可选模型:
+  # - "BAAI/bge-large-zh-v1.5" (效果更好但更大)
+  # - "shibing624/text2vec-base-chinese"
+  
+  # OpenAI配置（备选）
+  openai_api_key: ""  # OpenAI API密钥
+  openai_model: "text-embedding-3-small"
+
+# 向量数据库存储配置
 vector_db:
   collection_name: biography_materials
-  embedding_model: default  # 使用chroma默认embedding
-  chunk_size: 500
-  chunk_overlap: 100
+  chunk_size: 1000      # 增大到1000字，更好保持事件完整性
+  chunk_overlap: 200    # 增大重叠区域
 
 # 重试与并发
 retry:

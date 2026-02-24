@@ -34,12 +34,41 @@ class PathConfig(BaseSettings):
     cache_dir: str = "/Users/guoquan/work/Kimi/biography_writer/.cache"
 
 
+class EmbeddingConfig(BaseSettings):
+    """Embedding配置"""
+    # 提供器优先级列表
+    priority: list = Field(default_factory=lambda: [
+        "siliconflow", "sentence_transformer", "openai", "tfidf"
+    ])
+    
+    # 硅基流动配置
+    siliconflow_api_key: str = ""
+    siliconflow_model: str = "BAAI/bge-large-zh-v1.5"
+    
+    # SentenceTransformer配置
+    model: str = "BAAI/bge-small-zh-v1.5"
+    
+    # OpenAI配置
+    openai_api_key: str = ""
+    openai_model: str = "text-embedding-3-small"
+    
+    def get_embedding_manager_config(self) -> dict:
+        """获取Embedding管理器配置"""
+        return {
+            "priority": self.priority,
+            "siliconflow_api_key": self.siliconflow_api_key or os.getenv("SILICONFLOW_API_KEY"),
+            "siliconflow_model": self.siliconflow_model,
+            "model": self.model,
+            "openai_api_key": self.openai_api_key or os.getenv("OPENAI_API_KEY"),
+            "openai_model": self.openai_model,
+        }
+
+
 class VectorDBConfig(BaseSettings):
     """向量数据库配置"""
     collection_name: str = "biography_materials"
-    embedding_model: str = "BAAI/bge-large-zh-v1.5"
-    chunk_size: int = 500
-    chunk_overlap: int = 100
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
 
 
 class RetryConfig(BaseSettings):
@@ -64,6 +93,7 @@ class Settings(BaseSettings):
     model: ModelConfig = Field(default_factory=ModelConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     paths: PathConfig = Field(default_factory=PathConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     vector_db: VectorDBConfig = Field(default_factory=VectorDBConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
