@@ -38,15 +38,42 @@ def get_available_files() -> list:
     return sorted(files)
 
 
+def check_and_setup_config():
+    """检查并引导配置"""
+    from src.config_manager import ConfigManager
+
+    manager = ConfigManager()
+
+    # 检查是否有.env文件
+    env_file = Path(__file__).parent.parent / ".env"
+    if not env_file.exists():
+        console.print("[yellow]⚠️  首次使用需要进行配置[/yellow]")
+        console.print()
+
+        # 询问是否运行配置向导
+        if typer.confirm("是否运行配置向导？", default=True):
+            from src.setup_wizard import SetupWizard
+            wizard = SetupWizard()
+            if not wizard.run():
+                raise typer.Exit(1)
+        else:
+            console.print("[yellow]跳过配置，使用默认配置（可能无法正常工作）[/yellow]")
+
+
 @app.command()
 def init(
     file: Optional[str] = typer.Argument(None, help="采访文件路径（相对于interviews目录）"),
     subject: Optional[str] = typer.Option(None, "--subject", "-s", help="传主姓名"),
     style: WritingStyle = typer.Option(WritingStyle.LITERARY, "--style", help="写作风格"),
     words: int = typer.Option(100000, "--words", "-w", help="目标字数"),
+    skip_config: bool = typer.Option(False, "--skip-config", help="跳过配置检查"),
 ):
     """从采访文件初始化传记项目"""
-    
+
+    # 检查配置
+    if not skip_config:
+        check_and_setup_config()
+
     # 如果没有指定文件，列出可用文件
     if not file:
         available = get_available_files()
@@ -54,27 +81,33 @@ def init(
             console.print("[red]interviews目录下没有找到.txt或.md文件[/red]")
             console.print(f"[yellow]请将采访文件放入: {settings.paths.interview_dir}[/yellow]")
             raise typer.Exit(1)
-        
+
         console.print("[green]可用文件:[/green]")
         for i, f in enumerate(available, 1):
             console.print(f"  {i}. {f.name}")
-        
+
         selection = typer.prompt("请选择文件编号", type=int)
         if selection < 1 or selection > len(available):
             console.print("[red]无效的选择[/red]")
             raise typer.Exit(1)
-        
+
         file_path = available[selection - 1]
     else:
         file_path = Path(settings.paths.interview_dir) / file
         if not file_path.exists():
             console.print(f"[red]文件不存在: {file_path}[/red]")
             raise typer.Exit(1)
-    
-    # 检查API密钥
-    if not settings.model.api_key and not os.getenv("API_KEY"):
-        console.print("[red]错误: 未设置API密钥[/red]")
-        console.print("[yellow]请设置环境变量: export API_KEY=your_api_key[/yellow]")
+
+    # 检查API配置（使用配置管理器）
+    try:
+        from src.config_manager import ConfigManager
+        manager = ConfigManager()
+        llm_config = manager.check_llm_config()
+        emb_config = manager.check_embedding_config()
+        console.print(f"[green]✓ LLM配置: {llm_config[0]}[/green]")
+        console.print(f"[green]✓ Embedding配置: {emb_config[0]}[/green]")
+    except Exception as e:
+        console.print(f"[red]配置检查失败: {e}[/red]")
         raise typer.Exit(1)
     
     async def do_init():

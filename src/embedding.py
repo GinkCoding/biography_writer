@@ -266,25 +266,42 @@ class TFIDFEmbedding(EmbeddingProvider):
 class EmbeddingManager:
     """
     Embedding管理器 - 自动选择最佳可用方案
-    
+
     优先级（可配置）:
     1. 硅基流动SiliconFlow（国内API，中文效果优秀）
     2. SentenceTransformer（本地运行，无需网络）
     3. OpenAI（国际API）
     4. TF-IDF（轻量级备选）
     """
-    
-    def __init__(self, config: Optional[dict] = None):
+
+    def __init__(self, config: Optional[dict] = None, auto_prompt: bool = True):
+        """
+        初始化Embedding管理器
+
+        Args:
+            config: 配置字典，None则自动获取
+            auto_prompt: 配置缺失时是否自动提示用户输入
+        """
         self.config = config or {}
+        self.auto_prompt = auto_prompt
         self.provider: Optional[EmbeddingProvider] = None
         self._init_provider()
     
     def _init_provider(self):
         """初始化Embedding提供器（按优先级）"""
-        
+
         # 获取配置的优先级列表
         priority = self.config.get('priority', ['siliconflow', 'sentence_transformer', 'openai', 'tfidf'])
-        
+
+        # 如果启用了自动提示，使用配置管理器获取配置
+        if self.auto_prompt and not self.config:
+            from src.config_manager import ConfigManager
+            manager = ConfigManager()
+            provider_name, provider_config = manager.check_embedding_config()
+            self.config = provider_config
+            # 设置优先级为选中的提供商
+            priority = [provider_name]
+
         for provider_type in priority:
             try:
                 if provider_type == 'siliconflow':
@@ -302,7 +319,7 @@ class EmbeddingManager:
             except Exception as e:
                 logger.warning(f"{provider_type}初始化失败: {e}")
                 continue
-        
+
         raise RuntimeError("没有可用的Embedding提供器，请检查配置和网络连接")
     
     def _init_siliconflow(self):

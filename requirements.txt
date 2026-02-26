@@ -17,6 +17,9 @@ tiktoken>=0.5.0
 tenacity>=8.2.0
 loguru>=0.7.0
 
+# EPUB 导出
+ebooklib>=0.18
+
 # 测试依赖
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

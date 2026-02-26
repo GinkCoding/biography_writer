@@ -59,7 +59,16 @@ TEMPLATE_PHRASES = [
 
 class ContextAssembler:
     """上下文组装器"""
-    
+
+    # 感官描述关键词库
+    SENSORY_KEYWORDS = {
+        "visual": ["看见", "看到", "望", "瞧", "颜色", "光线", "阳光", "影子", "模样", "穿着", "表情", "眼神"],
+        "auditory": ["听见", "听到", "声音", "喊道", "说", "笑声", "哭声", "音乐", "歌声", "噪音", "寂静"],
+        "olfactory": ["闻到", "气味", "香味", "臭味", "气息", "味道", "烟味", "花香", "饭菜香"],
+        "tactile": ["感到", "摸", "触摸", "温度", "冷", "热", "疼痛", "粗糙", "光滑", "柔软", "坚硬"],
+        "gustatory": ["尝到", "味道", "甜", "苦", "辣", "酸", "咸", "好吃", "难吃"],
+    }
+
     def __init__(self, llm: LLMClient, vector_store: VectorStore):
         self.llm = llm
         self.vector_store = vector_store
@@ -94,18 +103,23 @@ class ContextAssembler:
         
         # 5. 时代背景增强
         era_context = self._build_era_context_enhanced(chapter)
-        
-        # 6. 素材覆盖率警告
+
+        # 6. 感官描写引导（新增）
+        sensory_details = self._analyze_sensory_details(material_context)
+        sensory_context = self._build_sensory_guidance(sensory_details, outline.style)
+
+        # 7. 素材覆盖率警告
         if coverage_info.get("coverage_ratio", 0) < 0.3:
             logger.warning(f"素材覆盖率严重不足: {coverage_info['status']} ({coverage_info['total_materials']}条素材)")
-        
+
         return {
             "global": global_context,
             "section": section_context,
             "materials": material_context,
             "continuity": continuity_context,
             "era": era_context,
-            "coverage_info": coverage_info,  # 添加覆盖率信息
+            "sensory": sensory_context,  # 新增感官引导
+            "coverage_info": coverage_info,
         }
     
     def _build_global_context(self, outline: BookOutline, global_state: Dict) -> str:
@@ -250,8 +264,73 @@ class ContextAssembler:
         
         return "\n".join(parts)
     
+    def _analyze_sensory_details(self, materials_text: str) -> Dict[str, List[str]]:
+        """分析素材中的感官描述细节"""
+        sensory_found = {k: [] for k in self.SENSORY_KEYWORDS.keys()}
+
+        for material_line in materials_text.split('\n'):
+            if material_line.startswith('内容:'):
+                content = material_line[3:].strip()
+                for sense_type, keywords in self.SENSORY_KEYWORDS.items():
+                    for keyword in keywords:
+                        if keyword in content and keyword not in sensory_found[sense_type]:
+                            # 提取关键词周围的上下文
+                            idx = content.find(keyword)
+                            start = max(0, idx - 15)
+                            end = min(len(content), idx + 20)
+                            context = content[start:end]
+                            sensory_found[sense_type].append(context)
+                            break
+
+        return sensory_found
+
+    def _build_sensory_guidance(self, sensory_details: Dict[str, List[str]], style: WritingStyle) -> str:
+        """构建感官描写引导"""
+        # 读取风格配置
+        import yaml
+        from pathlib import Path
+
+        style_file = Path(__file__).parent.parent.parent / "config" / "styles.yaml"
+        try:
+            with open(style_file, "r", encoding="utf-8") as f:
+                styles_config = yaml.safe_load(f)
+            style_config = styles_config.get("styles", {}).get(style.value, {})
+            sensory_focus = style_config.get("sensory_focus", [])
+        except:
+            sensory_focus = []
+
+        parts = ["=== 感官描写指引 ==="]
+
+        # 从素材中提取的感官细节
+        found_any = False
+        for sense_type, contexts in sensory_details.items():
+            if contexts:
+                found_any = True
+                type_name = {
+                    "visual": "视觉", "auditory": "听觉", "olfactory": "嗅觉",
+                    "tactile": "触觉", "gustatory": "味觉"
+                }.get(sense_type, sense_type)
+                parts.append(f"【{type_name}细节素材】")
+                for ctx in contexts[:3]:  # 最多3个示例
+                    parts.append(f"  - ...{ctx}...")
+
+        if not found_any:
+            parts.append("【提示】当前素材中感官描述较少，建议结合时代背景补充具体感官细节。")
+
+        # 风格要求的感官重点
+        if sensory_focus:
+            parts.append(f"\n【本风格侧重的感官】{', '.join(sensory_focus)}")
+            parts.append("请在写作中优先考虑以上感官类型的描写。")
+
+        parts.append("\n【写作要求】")
+        parts.append("1. 每300字至少包含1-2处感官细节描写")
+        parts.append("2. 优先使用素材中已有的感官线索")
+        parts.append("3. 结合时代背景补充合理的感官信息（如当时的流行歌曲、食物味道等）")
+        parts.append("4. 避免套路化感官描写（如'茶香四溢'等），追求具体独特")
+
+        return "\n".join(parts)
+
     def _build_era_context_enhanced(self, chapter: ChapterOutline) -> str:
-        """增强版时代背景构建"""
         if not chapter.time_period_start:
             return """=== 时代背景 ===
 【提示】本章未明确指定时间段，请根据上下文推断或保持模糊处理。
@@ -487,14 +566,53 @@ class ContentGenerationEngine:
 {context.get('continuity', '')}
 
 {context.get('era', '')}
+
+{context.get('sensory', '')}
 {word_hint}
+
+=== 段落级写作指引（如适用）===
+{self._build_paragraph_guidance(context.get('paragraph_outlines', []), context.get('pacing', 'moderate'))}
 
 【输出要求】
 1. 直接输出正文内容，不要包含章节标题
 2. 确保内容紧扣大纲，事实准确，细节丰富
 3. 必须使用素材中的具体细节，禁止泛泛而谈
-4. 结尾自然过渡，不要强行制造悬念
+4. 注重感官描写，让场景可感可知
+5. 段落之间过渡自然，逻辑清晰
+6. 结尾自然收束，不要强行制造悬念
 """
+
+    def _build_paragraph_guidance(self, paragraph_outlines: list, pacing: str) -> str:
+        """构建段落级写作指引"""
+        if not paragraph_outlines:
+            return "（本节无段落级规划，请按常规方式展开）"
+
+        pacing_guide = {
+            "slow": "节奏舒缓，适合描写和反思",
+            "moderate": "节奏适中，叙述与描写平衡",
+            "fast": "节奏紧凑，以行动和对话为主",
+            "mixed": "节奏起伏，张弛有度"
+        }.get(pacing, "节奏适中")
+
+        parts = [f"本节整体节奏：{pacing_guide}", "段落安排："]
+
+        for para in paragraph_outlines:
+            para_type_name = {
+                "narrative": "叙述",
+                "dialogue": "对话",
+                "description": "描写",
+                "reflection": "思考"
+            }.get(para.get('type', 'narrative'), para.get('type', '叙述'))
+
+            detail_hint = f"必须包含：{', '.join(para.get('key_details', [])[:2])}" if para.get('key_details') else ""
+            sensory_hint = f"侧重感官：{', '.join(para.get('sensory_focus', []))}" if para.get('sensory_focus') else ""
+
+            parts.append(
+                f"  第{para.get('order')}段（{para_type_name}）：{para.get('purpose', '推进叙事')} "
+                f"{detail_hint} {sensory_hint}（约{para.get('target_words', 150)}字）"
+            )
+
+        return "\n".join(parts)
     
     def _post_process_content(self, content: str) -> str:
         """后处理生成的内容"""
@@ -632,10 +750,23 @@ class IterativeGenerationLayer:
                 global_state=global_state,
                 previous_section_summary=previous_summary
             )
-            
-            # 提取小节标题
+
+            # 提取小节标题和段落级大纲
             context["section_title"] = section_outline.title
-            
+            if section_outline.paragraphs:
+                context["paragraph_outlines"] = [
+                    {
+                        "order": p.order,
+                        "type": p.paragraph_type,
+                        "purpose": p.content_purpose,
+                        "key_details": p.key_details,
+                        "sensory_focus": p.sensory_focus,
+                        "target_words": p.target_words,
+                    }
+                    for p in section_outline.paragraphs
+                ]
+            context["pacing"] = section_outline.pacing
+
             # 生成内容
             section = await self.generation_engine.generate_section(
                 context=context,

@@ -159,8 +159,19 @@ class BiographyEngine:
             chapter_context = {
                 "time_period_start": chapter_outline.time_period_start,
                 "time_period_end": chapter_outline.time_period_end,
+                "style": self.outline.style.value if self.outline else "literary",
+                "subject_name": self.outline.subject_name if self.outline else "",
+                "chapter_num": chapter_num,
             }
-            chapter = await self.review_layer.review_chapter(chapter, chapter_context)
+
+            # 获取前一章用于跨章节一致性检查
+            previous_chapter = chapters[-1] if chapters else None
+
+            chapter = await self.review_layer.review_chapter(
+                chapter=chapter,
+                chapter_context=chapter_context,
+                previous_chapter=previous_chapter
+            )
             
             chapters.append(chapter)
             

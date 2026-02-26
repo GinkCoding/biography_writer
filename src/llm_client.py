@@ -1,4 +1,5 @@
-"""大模型客户端封装 - 使用Kimi直接调用"""
+"""大模型客户端封装 - 支持多提供商和自动配置"""
+import os
 import asyncio
 from typing import AsyncIterator, List, Dict, Any, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -9,14 +10,92 @@ from src.models import WritingStyle
 
 
 class LLMClient:
-    """使用Kimi作为底层模型的客户端"""
-    
-    def __init__(self):
-        # 不再调用外部API，而是通过 MCP 工具调用当前Kimi
-        self.provider = "kimi"
+    """
+    多提供商LLM客户端
+
+    支持：Kimi、OpenAI、智谱AI等
+    自动检测配置并引导用户输入
+    """
+
+    def __init__(self, provider: Optional[str] = None, config: Optional[Dict] = None):
+        """
+        初始化LLM客户端
+
+        Args:
+            provider: 提供商名称 (kimi, openai, zhipuai)，None则自动检测
+            config: 配置字典，None则自动获取
+        """
+        # 如果未提供配置，使用配置管理器获取
+        if provider is None or config is None:
+            from src.config_manager import ConfigManager
+            manager = ConfigManager()
+            self.provider, self.config = manager.check_llm_config(provider)
+        else:
+            self.provider = provider
+            self.config = config
+
         self.max_tokens = settings.model.max_tokens
         self.temperature = settings.model.temperature
-    
+
+        # 初始化对应提供商的客户端
+        self._init_client()
+
+    def _init_client(self):
+        """初始化具体提供商的客户端"""
+        if self.provider == "kimi":
+            self._init_kimi()
+        elif self.provider == "openai":
+            self._init_openai()
+        elif self.provider == "zhipuai":
+            self._init_zhipuai()
+        else:
+            raise ValueError(f"不支持的提供商: {self.provider}")
+
+    def _init_kimi(self):
+        """初始化Kimi客户端"""
+        try:
+            from openai import OpenAI
+            self.client = OpenAI(
+                api_key=self.config.get('api_key'),
+                base_url=self.config.get('base_url', 'https://api.moonshot.cn/v1')
+            )
+            self.model = self.config.get('model', 'moonshot-v1-128k')
+            logger.info(f"Kimi客户端初始化成功，模型: {self.model}")
+        except ImportError:
+            logger.error("未安装openai包，请运行: pip install openai")
+            raise
+
+    def _init_openai(self):
+        """初始化OpenAI客户端"""
+        try:
+            from openai import OpenAI
+            base_url = self.config.get('base_url')
+            kwargs = {'api_key': self.config.get('api_key')}
+            if base_url:
+                kwargs['base_url'] = base_url
+            self.client = OpenAI(**kwargs)
+            self.model = self.config.get('model', 'gpt-4-turbo-preview')
+            logger.info(f"OpenAI客户端初始化成功，模型: {self.model}")
+        except ImportError:
+            logger.error("未安装openai包，请运行: pip install openai")
+            raise
+
+    def _init_zhipuai(self):
+        """初始化智谱AI客户端"""
+        try:
+            from zhipuai import ZhipuAI
+            self.client = ZhipuAI(api_key=self.config.get('api_key'))
+            self.model = self.config.get('model', 'glm-4')
+            logger.info(f"智谱AI客户端初始化成功，模型: {self.model}")
+        except ImportError:
+            logger.error("未安装zhipuai包，请运行: pip install zhipuai")
+            raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True
+    )
     async def complete(
         self,
         messages: List[Dict[str, str]],
@@ -24,102 +103,164 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         stream: bool = False
     ) -> str:
-        """完成一次对话 - 实际通过调用自己实现"""
-        # 构建完整提示词
-        prompt = self._build_prompt(messages)
-        
+        """
+        完成一次对话
+
+        Args:
+            messages: 消息列表
+            temperature: 温度参数
+            max_tokens: 最大token数
+            stream: 是否流式输出
+
+        Returns:
+            生成的文本
+        """
+        temp = temperature or self.temperature
+        max_tok = max_tokens or self.max_tokens
+
         try:
-            # 通过模拟方式返回结果
-            # 实际运行时，这个调用会被外层系统拦截并交由Kimi处理
-            response = await self._call_kimi(prompt, temperature or self.temperature)
-            return response
+            if self.provider in ['kimi', 'openai']:
+                return await self._call_openai_compatible(messages, temp, max_tok)
+            elif self.provider == 'zhipuai':
+                return await self._call_zhipuai(messages, temp, max_tok)
+            else:
+                raise ValueError(f"不支持的提供商: {self.provider}")
         except Exception as e:
-            logger.error(f"调用失败: {e}")
+            logger.error(f"LLM调用失败: {e}")
             raise
-    
+
+    async def _call_openai_compatible(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int
+    ) -> str:
+        """调用OpenAI兼容API"""
+        loop = asyncio.get_event_loop()
+
+        def _call():
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return response.choices[0].message.content
+
+        return await loop.run_in_executor(None, _call)
+
+    async def _call_zhipuai(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int
+    ) -> str:
+        """调用智谱AI API"""
+        loop = asyncio.get_event_loop()
+
+        def _call():
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return response.choices[0].message.content
+
+        return await loop.run_in_executor(None, _call)
+
     async def complete_stream(
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None
     ) -> AsyncIterator[str]:
-        """流式输出 - 非流式模式模拟"""
-        content = await self.complete(messages, temperature, max_tokens)
-        # 模拟流式，每次返回一部分
-        chunk_size = 50
-        for i in range(0, len(content), chunk_size):
-            yield content[i:i+chunk_size]
-            await asyncio.sleep(0.01)
-    
-    def _build_prompt(self, messages: List[Dict[str, str]]) -> str:
-        """将messages转换为单一提示词"""
-        parts = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                parts.append(f"【系统指令】\n{content}\n")
-            elif role == "user":
-                parts.append(f"【用户】\n{content}\n")
-            elif role == "assistant":
-                parts.append(f"【助手】\n{content}\n")
-        return "\n".join(parts)
-    
-    async def _call_kimi(self, prompt: str, temperature: float) -> str:
-        """
-        调用Kimi - 这个函数在独立运行时会使用stdin/stdout通信
-        在实际MCP环境中，请求会被路由到Kimi
-        """
-        # 检查是否有MCP上下文（通过检测特殊环境变量）
-        import os
-        
-        if os.getenv("MCP_CONTEXT"):
-            # 在MCP环境中，直接返回一个标记，外层会处理
-            return f"<MCP_CALL>{prompt}</MCP_CALL>"
-        
-        # 独立运行模式：通过subprocess调用kimi-cli
-        # 或者返回提示用户需要手动输入
-        return self._interactive_mode(prompt)
-    
-    def _interactive_mode(self, prompt: str) -> str:
-        """交互模式 - 提示用户手动处理"""
-        logger.info("=" * 60)
-        logger.info("请复制以下提示词到Kimi对话框，然后将回复粘贴回来：")
-        logger.info("=" * 60)
-        print("\n" + prompt + "\n")
-        logger.info("=" * 60)
-        
-        # 读取用户输入作为响应
-        print("\n请输入Kimi的回复（输入EOF结束）：\n")
-        lines = []
-        try:
-            while True:
-                line = input()
-                lines.append(line)
-        except EOFError:
-            pass
-        
-        return "\n".join(lines)
-    
+        """流式输出"""
+        temp = temperature or self.temperature
+        max_tok = max_tokens or self.max_tokens
+
+        loop = asyncio.get_event_loop()
+
+        def _stream():
+            if self.provider in ['kimi', 'openai']:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tok,
+                    stream=True
+                )
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+            elif self.provider == 'zhipuai':
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tok,
+                    stream=True
+                )
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+
+        # 将同步生成器转换为异步生成器
+        import threading
+        import queue
+
+        result_queue = queue.Queue()
+
+        def _producer():
+            try:
+                for chunk in _stream():
+                    result_queue.put(chunk)
+                result_queue.put(None)  # 结束标记
+            except Exception as e:
+                result_queue.put(e)
+
+        thread = threading.Thread(target=_producer)
+        thread.start()
+
+        while True:
+            try:
+                item = await loop.run_in_executor(None, result_queue.get, True, 0.1)
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+            except queue.Empty:
+                if not thread.is_alive():
+                    break
+                await asyncio.sleep(0.01)
+
     def build_system_prompt(self, style: WritingStyle, extra_context: str = "") -> str:
         """构建系统提示词"""
         import yaml
         from pathlib import Path
-        
+
         # 加载风格配置
         style_file = Path(__file__).parent.parent / "config" / "styles.yaml"
         with open(style_file, "r", encoding="utf-8") as f:
             styles_config = yaml.safe_load(f)
-        
+
         style_key = style.value
         style_config = styles_config.get("styles", {}).get(style_key, {})
-        
+
         system_prompt = style_config.get("system_prompt", "")
-        
+
         if extra_context:
             system_prompt += f"\n\n=== 额外上下文 ===\n{extra_context}"
-        
+
         return system_prompt
 
 
-from pathlib import Path
+# 便捷函数
+def get_llm_client(provider: Optional[str] = None) -> LLMClient:
+    """
+    获取LLM客户端（自动处理配置）
+
+    如果配置缺失，会自动暂停并引导用户输入
+    """
+    return LLMClient(provider=provider)
