@@ -742,7 +742,70 @@ class KnowledgeMemoryLayer:
             if profile.era_influence:
                 parts.append(f"**时代影响**: {profile.era_influence}\n")
 
-        # 十、事件档案
+        # 十、信息补全与合理推断
+        parts.append("\n## 十、信息补全与合理推断\n")
+        parts.append("> ⚠️ **重要提示**：本节内容基于人物背景信息（出生年份、地域、家庭背景等）进行合理推断，用于补足采访信息的空白。这些推断符合时代背景和社会规律，但具体到个人可能有差异，需要进一步核实。\n")
+
+        try:
+            from src.inference_engine import analyze_information_completeness
+            inference_result = analyze_information_completeness(facts, timeline)
+
+            # 信息完整性评估
+            completeness = inference_result.get('completeness_score', 0)
+            parts.append(f"\n### 信息完整性评估\n")
+            parts.append(f"- **完整性评分**: {completeness:.0%}")
+            parts.append(f"- **信息缺口数**: {inference_result.get('analysis_summary', {}).get('total_gaps', 0)} 个")
+            parts.append(f"- **关键缺口**: {inference_result.get('analysis_summary', {}).get('critical_gaps', 0)} 个\n")
+
+            # 推断的人生轨迹
+            segments = inference_result.get('inferred_segments', [])
+            if segments:
+                parts.append("\n### 推断的人生轨迹\n")
+                for seg in segments:
+                    parts.append(f"\n**{seg.get('period', '未知时期')}** ({seg.get('life_stage', '')})")
+                    parts.append(f"- **典型经历**: {', '.join(seg.get('typical_events', []))}")
+                    if seg.get('social_context'):
+                        parts.append(f"- **时代背景**: {seg['social_context']}")
+                    parts.append(f"- **置信度**: {seg.get('confidence', 0):.0%}")
+                    if seg.get('basis'):
+                        parts.append(f"- **推断依据**: {', '.join(seg['basis'])}")
+                    parts.append(f"- **类型**: 🔍 合理推断\n")
+
+            # 人物画像增强
+            profile_enrichment = inference_result.get('profile_enrichment', {})
+            enrichments = profile_enrichment.get('inferred_enrichments', {})
+            if enrichments:
+                parts.append("\n### 画像特征推断\n")
+                if enrichments.get('life_stage'):
+                    parts.append(f"- **当前人生阶段**: {enrichments['life_stage']}")
+                if enrichments.get('generation'):
+                    parts.append(f"- **代际归属**: {enrichments['generation']}")
+                if enrichments.get('era_features'):
+                    parts.append(f"- **时代特征**: {', '.join(enrichments['era_features'])}")
+                if enrichments.get('typical_concerns'):
+                    parts.append(f"- **典型关注**: {', '.join(enrichments['typical_concerns'])}")
+                if enrichments.get('region_type'):
+                    parts.append(f"- **地域类型**: {enrichments['region_type']}")
+
+            # 信息缺口提示
+            gaps = inference_result.get('gaps', [])
+            if gaps:
+                parts.append("\n### 建议补充的信息\n")
+                parts.append("以下时间段信息不足，建议通过补充采访或资料核实：\n")
+                for gap in gaps[:5]:  # 只显示前5个
+                    parts.append(f"- **{gap.get('description', '')}** ({gap.get('severity', 'medium')})")
+
+            # 使用警告
+            if inference_result.get('warnings'):
+                parts.append("\n### ⚠️ 使用注意事项\n")
+                for warning in inference_result.get('warnings', []):
+                    parts.append(f"- {warning}")
+
+        except Exception as e:
+            logger.warning(f"信息推理失败: {e}")
+            parts.append("\n（信息推理模块暂时不可用）\n")
+
+        # 十一、事件档案
         if facts.events:
             parts.append("\n## 十、关键事件档案\n")
             # 按重要性排序

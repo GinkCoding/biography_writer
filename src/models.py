@@ -203,10 +203,12 @@ class SectionOutline(BaseModel):
     target_words: int
     key_events: List[str] = []  # 关联的事件ID
     content_summary: str  # 内容概要
-    emotional_tone: str  # 情感基调
+    emotional_tone: str = ""  # 情感基调
     material_refs: List[str] = []  # 引用的素材块ID
     paragraphs: List[ParagraphOutline] = []  # 段落级大纲（可选，用于精细控制）
     pacing: str = "moderate"  # 节奏: slow(舒缓)/moderate(适中)/fast(紧凑)/mixed(起伏)
+    is_inferred: bool = False  # 是否为推断内容
+    inference_basis: List[str] = []  # 推断依据说明
 
 
 class ChapterOutline(BaseModel):
@@ -236,7 +238,8 @@ class BookOutline(BaseModel):
     chapters: List[ChapterOutline] = []
     prologue: Optional[str] = None  # 前言/序
     epilogue: Optional[str] = None  # 后记
-    
+    inference_note: Optional[Dict[str, Any]] = None  # 信息推理说明
+
     @property
     def actual_total_words(self) -> int:
         return sum(c.target_words for c in self.chapters)

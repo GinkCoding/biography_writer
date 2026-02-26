@@ -783,29 +783,60 @@ class OutlineGenerator:
 
 class PlanningOrchestrationLayer:
     """规划与编排层主类"""
-    
+
     def __init__(self, llm: LLMClient):
         self.llm = llm
         self.style_controller = StyleController()
         self.outline_generator = OutlineGenerator(llm)
-    
+        self.inference_engine = None
+
     async def create_book_plan(
         self,
         timeline: Timeline,
         style: WritingStyle,
         target_words: Optional[int] = None,
-        total_chapters: Optional[int] = None
+        total_chapters: Optional[int] = None,
+        enable_inference: bool = True
     ) -> BookOutline:
         """
         创建完整的书籍规划
-        
+
+        Args:
+            timeline: 时间线
+            style: 写作风格
+            target_words: 目标字数
+            total_chapters: 章节数
+            enable_inference: 是否启用信息推理补全
+
         Returns:
             BookOutline: 书籍大纲
         """
         # 使用配置默认值
         target = target_words or settings.generation.target_length
         chapters = total_chapters or settings.generation.total_chapters
-        
+
+        # 检查信息完整性并补全
+        if enable_inference:
+            from src.inference_engine import analyze_information_completeness
+            try:
+                logger.info("分析信息完整性...")
+                completeness_result = analyze_information_completeness(
+                    facts=None,  # 会在内部处理
+                    timeline=timeline
+                )
+                completeness = completeness_result.get('completeness_score', 0)
+                logger.info(f"信息完整性: {completeness:.0%}")
+
+                if completeness < 0.6:
+                    logger.warning(f"采访信息较少 (完整度{completeness:.0%})，将启用信息推理补全")
+                    # 保存推理结果供后续使用
+                    self._inference_result = completeness_result
+                else:
+                    self._inference_result = None
+            except Exception as e:
+                logger.warning(f"信息完整性分析失败: {e}")
+                self._inference_result = None
+
         # 生成大纲
         outline = await self.outline_generator.generate_outline(
             timeline=timeline,
@@ -813,8 +844,71 @@ class PlanningOrchestrationLayer:
             target_words=target,
             total_chapters=chapters
         )
-        
+
+        # 如果信息不足，补充推断的章节内容
+        if enable_inference and hasattr(self, '_inference_result') and self._inference_result:
+            outline = await self._enrich_outline_with_inference(outline, self._inference_result)
+
         logger.info(f"书籍规划完成: {outline.title}, 预计{outline.target_total_words}字")
+        return outline
+
+    async def _enrich_outline_with_inference(
+        self,
+        outline: BookOutline,
+        inference_result: Dict
+    ) -> BookOutline:
+        """使用推理结果丰富大纲内容"""
+        logger.info("使用信息推理结果补全大纲...")
+
+        # 获取推断的人生阶段
+        segments = inference_result.get('inferred_segments', [])
+        gaps = inference_result.get('gaps', [])
+
+        if not segments and not gaps:
+            return outline
+
+        # 为每个信息缺口生成概要性章节小节
+        for gap in gaps:
+            if gap.get('severity') in ['critical', 'high']:
+                # 找到对应的时间段
+                start_time = gap.get('start_time')
+                end_time = gap.get('end_time')
+
+                # 查找是否有覆盖这个时期的章节
+                matching_chapter = None
+                for ch in outline.chapters:
+                    ch_start = ch.time_period_start
+                    ch_end = ch.time_period_end
+                    if ch_start and ch_end:
+                        # 简单的时间匹配
+                        if (start_time and ch_start <= start_time <= ch_end) or \
+                           (end_time and ch_start <= end_time <= ch_end):
+                            matching_chapter = ch
+                            break
+
+                if matching_chapter:
+                    # 在该章节中添加推断性的内容提示
+                    gap_desc = gap.get('description', '')
+                    # 添加一个"合理推断"小节
+                    inferred_section = SectionOutline(
+                        id=f"inferred_{matching_chapter.order}_{gap.get('gap_type', 'gap')}",
+                        title=f"【推断】{gap_desc[:20]}...",
+                        target_words=500,
+                        content_summary=f"基于时代背景的合理推断：{gap_desc}",
+                        is_inferred=True  # 标记为推断内容
+                    )
+                    matching_chapter.sections.append(inferred_section)
+                    logger.debug(f"为第{matching_chapter.order}章添加推断小节: {gap_desc}")
+
+        # 在大纲中添加信息补全说明
+        outline.inference_note = {
+            "enabled": True,
+            "completeness_score": inference_result.get('completeness_score', 0),
+            "total_gaps": len(gaps),
+            "inferred_segments": len(segments),
+            "warning": "本章包含基于时代背景的合理推断内容，标注为【推断】的部分需进一步核实"
+        }
+
         return outline
     
     def get_available_styles(self) -> List[Dict]:

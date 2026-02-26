@@ -554,7 +554,31 @@ class ContentGenerationEngine:
     def _build_generation_prompt(self, context: Dict[str, str], target_words: int) -> str:
         """构建生成提示词"""
         word_hint = f"\n=== 字数要求 ===\n本节目标字数：{target_words}字\n" if target_words else ""
-        
+
+        # 检查是否为推断内容
+        is_inferred = context.get('is_inferred', False)
+        inference_hint = ""
+        if is_inferred:
+            inference_basis = context.get('inference_basis', [])
+            basis_text = '\n'.join([f"  - {b}" for b in inference_basis]) if inference_basis else "  - 基于时代背景和社会规律推断"
+            inference_hint = f"""
+=== ⚠️ 重要提示：本节为推断内容 ===
+本节内容基于人物的出生年份、地域背景、时代特征等信息进行合理推断，用于补足采访信息的空白。
+
+推断依据：
+{basis_text}
+
+写作要求：
+1. 内容必须符合时代背景和社会规律，力求合理但不编造具体事件
+2. 描述应为"类别性"而非"具体性"——例如可以说"从事个体经营"而非"开了一家服装店"
+3. 避免虚构具体人名、地名、数字，使用概括性表述
+4. 在文中不需要标注"这是推断内容"，但要确保语气是描述性的而非确定性的
+5. 可以描述典型的环境氛围、社会风气、常见的生活状态
+6. 如果素材中有任何相关线索，优先使用素材中的信息
+
+===
+"""
+
         return f"""请根据以下信息撰写传记内容：
 
 {context.get('global', '')}
@@ -569,6 +593,7 @@ class ContentGenerationEngine:
 
 {context.get('sensory', '')}
 {word_hint}
+{inference_hint}
 
 === 段落级写作指引（如适用）===
 {self._build_paragraph_guidance(context.get('paragraph_outlines', []), context.get('pacing', 'moderate'))}
@@ -766,6 +791,12 @@ class IterativeGenerationLayer:
                     for p in section_outline.paragraphs
                 ]
             context["pacing"] = section_outline.pacing
+
+            # 传递推断信息
+            if section_outline.is_inferred:
+                context["is_inferred"] = True
+                context["inference_basis"] = section_outline.inference_basis
+                logger.info(f"  生成推断内容: {section_outline.title}")
 
             # 生成内容
             section = await self.generation_engine.generate_section(
