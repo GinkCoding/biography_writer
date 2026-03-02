@@ -5,6 +5,7 @@
 from .workflow_tracer import WorkflowTracer, TraceEvent, trace_event
 from .metrics_collector import MetricsCollector, WorkflowMetrics, APICallMetrics
 from .health_reporter import HealthReporter, HealthReport
+from .runtime_monitor import RuntimeMonitor, get_runtime_monitor
 
 __all__ = [
     # 工作流追踪
@@ -18,4 +19,7 @@ __all__ = [
     # 健康报告
     'HealthReporter',
     'HealthReport',
+    # 运行时监控
+    'RuntimeMonitor',
+    'get_runtime_monitor',
 ]

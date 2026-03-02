@@ -3,6 +3,7 @@
 import os
 import sys
 import asyncio
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,8 @@ sys.path.insert(0, str(project_root))
 from src.engine import BiographyEngine
 from src.models import WritingStyle
 from src.config import settings
+from src.observability.logging_setup import setup_application_logging
+from src.observability.runtime_monitor import get_runtime_monitor
 
 app = typer.Typer(help="传记写作工具 - 将采访转化为十万字传记")
 console = Console()
@@ -120,11 +123,15 @@ def init(
         ) as progress:
             task = progress.add_task("正在初始化项目...", total=None)
             
+            def on_progress(msg: str):
+                progress.update(task, description=f"[cyan]{msg}[/cyan]")
+            
             book_id = await engine.initialize_from_interview(
                 interview_file=file_path,
                 subject_hint=subject,
                 style=style,
-                target_words=words
+                target_words=words,
+                progress_callback=on_progress,
             )
             
             progress.update(task, description="[green]初始化完成![/green]")
@@ -289,15 +296,81 @@ def status(
         engine.load_project(book_id)
     
     progress = engine.get_progress()
-    
-    console.print(Panel(
-        f"[bold]项目ID:[/bold] {progress['book_id']}\n"
-        f"[bold]当前进度:[/bold] 第{progress['current_chapter']}/{progress['total_chapters']}章\n"
-        f"[bold]完成度:[/bold] {progress['progress_percent']:.1f}%\n"
-        f"[bold]状态:[/bold] {progress['status']}",
-        title="项目状态",
-        box=box.ROUNDED
-    ))
+
+    console.print(
+        Panel(
+            f"[bold]项目ID:[/bold] {progress['book_id']}\n"
+            f"[bold]当前进度:[/bold] 第{progress['current_chapter']}/{progress['total_chapters']}章\n"
+            f"[bold]完成度:[/bold] {progress['progress_percent']:.1f}%\n"
+            f"[bold]状态:[/bold] {progress['status']}\n"
+            f"[bold]运行ID:[/bold] {progress.get('run_id') or 'N/A'}\n"
+            f"[bold]当前阶段:[/bold] {progress.get('runtime_stage') or 'N/A'}\n"
+            f"[bold]最后消息:[/bold] {progress.get('last_message') or 'N/A'}\n"
+            f"[bold]事件数:[/bold] {progress.get('event_count', 0)}",
+            title="项目状态",
+            box=box.ROUNDED,
+        )
+    )
+    if progress.get("status_file"):
+        console.print(f"[dim]status.json: {progress['status_file']}[/dim]")
+    if progress.get("events_file"):
+        console.print(f"[dim]events.jsonl: {progress['events_file']}[/dim]")
+    if progress.get("artifacts_dir"):
+        console.print(f"[dim]artifacts/: {progress['artifacts_dir']}[/dim]")
+
+
+@app.command(name="runtime-status")
+def runtime_status(
+    id: Optional[str] = typer.Option(None, "--id", help="项目ID（可选）"),
+    tail: int = typer.Option(8, "--tail", help="显示最近N条事件"),
+):
+    """查看最新运行态监控信息（无需项目已完成初始化）"""
+    monitor = get_runtime_monitor(project_root=project_root)
+    status = monitor.get_latest_status(book_id=id)
+    if not status:
+        console.print("[yellow]没有找到运行记录[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(
+        Panel(
+            f"[bold]运行ID:[/bold] {status.get('run_id', 'N/A')}\n"
+            f"[bold]项目ID:[/bold] {status.get('book_id', 'N/A')}\n"
+            f"[bold]状态:[/bold] {status.get('status', 'N/A')}\n"
+            f"[bold]当前阶段:[/bold] {status.get('current_stage', 'N/A')}\n"
+            f"[bold]最后消息:[/bold] {status.get('last_message', 'N/A')}\n"
+            f"[bold]更新时间:[/bold] {status.get('updated_at', 'N/A')}\n"
+            f"[bold]事件数:[/bold] {status.get('event_count', 0)}",
+            title="运行态监控",
+            box=box.ROUNDED,
+        )
+    )
+    for key in ["status_file", "events_file", "artifacts_dir", "manifest_file"]:
+        if status.get(key):
+            console.print(f"[dim]{key}: {status[key]}[/dim]")
+
+    events_file = status.get("events_file")
+    if events_file and tail > 0:
+        path = Path(events_file)
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()[-tail:]
+            table = Table(show_header=True, header_style="bold cyan", box=box.SIMPLE)
+            table.add_column("时间", style="green", width=19)
+            table.add_column("阶段", style="magenta", width=18)
+            table.add_column("状态", style="yellow", width=10)
+            table.add_column("消息", style="white")
+            for line in lines:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                table.add_row(
+                    str(event.get("timestamp", ""))[:19],
+                    str(event.get("stage", "")),
+                    str(event.get("status", "")),
+                    str(event.get("message", "")),
+                )
+            console.print()
+            console.print(table)
 
 
 @app.command()
@@ -633,6 +706,8 @@ def init_git(
 
 def main():
     """主入口"""
+    setup_application_logging()
+
     # 显示欢迎信息
     if len(sys.argv) == 1:
         console.print(Panel(
@@ -646,6 +721,7 @@ def main():
             "  [green]write[/green]       - 生成传记\n"
             "  [green]styles[/green]      - 查看可用风格\n"
             "  [green]status[/green]      - 查看项目状态\n"
+            "  [green]runtime-status[/green] - 查看运行态监控\n"
             "  [green]git-status[/green] - 查看Git版本状态\n"
             "  [green]git-log[/green]    - 查看提交历史\n"
             "  [green]rollback[/green]   - 回滚到指定章节\n"

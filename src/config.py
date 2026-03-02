@@ -15,6 +15,8 @@ class ModelConfig(BaseSettings):
     max_tokens: int = 4000
     temperature: float = 0.7
     top_p: float = 0.9
+    request_timeout_seconds: int = 300
+    heartbeat_interval_seconds: int = 10
 
 
 class GenerationConfig(BaseSettings):

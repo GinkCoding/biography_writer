@@ -1,2 +1,21 @@
-*.pyc
+# Python
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime artifacts
+.cache/
+.vector_db/
+.observability/
+output/
+*.log
+
+# Secrets / local envs
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store

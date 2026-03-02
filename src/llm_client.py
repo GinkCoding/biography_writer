@@ -2,8 +2,8 @@
 import os
 import asyncio
 from datetime import datetime
-from typing import AsyncIterator, List, Dict, Any, Optional
-from tenacity import retry, stop_after_attempt, wait_exponential
+from pathlib import Path
+from typing import AsyncIterator, List, Dict, Any, Optional, Callable
 from loguru import logger
 
 from src.config import settings
@@ -12,6 +12,7 @@ from src.models import WritingStyle
 # 导入可观测性模块
 from src.observability import MetricsCollector
 from src.observability.workflow_tracer import WorkflowTracer, LayerType, TraceStatus
+from src.observability.runtime_monitor import get_runtime_monitor
 
 
 class LLMClient:
@@ -41,13 +42,89 @@ class LLMClient:
 
         self.max_tokens = settings.model.max_tokens
         self.temperature = settings.model.temperature
+        self.max_attempts = max(1, int(getattr(settings.retry, "max_attempts", 3)))
+        self.backoff_factor = max(1, int(getattr(settings.retry, "backoff_factor", 2)))
+        self.request_timeout_seconds = max(
+            10,
+            int(
+                os.getenv(
+                    "LLM_REQUEST_TIMEOUT_SECONDS",
+                    str(getattr(settings.model, "request_timeout_seconds", 300)),
+                )
+            ),
+        )
+        self.heartbeat_interval_seconds = max(
+            3,
+            int(
+                os.getenv(
+                    "LLM_HEARTBEAT_INTERVAL_SECONDS",
+                    str(getattr(settings.model, "heartbeat_interval_seconds", 10)),
+                )
+            ),
+        )
 
         # 初始化可观测性组件
         self.metrics = MetricsCollector()
         self.tracer = WorkflowTracer()
+        self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).parent.parent)
+        self._progress_callback: Optional[Callable[[str], None]] = None
 
         # 初始化对应提供商的客户端
         self._init_client()
+
+    def set_progress_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """设置进度回调，用于CLI实时输出。"""
+        self._progress_callback = callback
+
+    def _notify_progress(self, message: str) -> None:
+        logger.info(message)
+        if self._progress_callback:
+            try:
+                self._progress_callback(message)
+            except Exception:
+                # 不允许回调异常影响主流程
+                pass
+
+    async def _wait_with_heartbeat(
+        self,
+        awaitable: "asyncio.Future[str]",
+        attempt: int,
+    ) -> str:
+        """等待异步请求完成，并输出心跳日志。"""
+        task = asyncio.ensure_future(awaitable)
+        started = datetime.now()
+
+        while True:
+            elapsed = (datetime.now() - started).total_seconds()
+            remaining = self.request_timeout_seconds - elapsed
+            if remaining <= 0:
+                task.cancel()
+                timeout_msg = (
+                    f"LLM请求超时: 已等待{int(elapsed)}秒 "
+                    f"(timeout={self.request_timeout_seconds}s, attempt={attempt})"
+                )
+                self.runtime_monitor.log_event(
+                    stage="llm",
+                    status="failed",
+                    message=timeout_msg,
+                    metadata={"attempt": attempt},
+                )
+                raise TimeoutError(timeout_msg)
+
+            wait_window = min(self.heartbeat_interval_seconds, remaining)
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=wait_window)
+            except asyncio.TimeoutError:
+                heartbeat_msg = (
+                    f"LLM请求进行中... 已等待{int(elapsed)}秒 "
+                    f"(attempt={attempt}/{self.max_attempts})"
+                )
+                self._notify_progress(heartbeat_msg)
+                self.runtime_monitor.heartbeat(
+                    stage="llm",
+                    message=heartbeat_msg,
+                    metadata={"attempt": attempt, "elapsed_seconds": int(elapsed)},
+                )
 
     def _init_client(self):
         """初始化具体提供商的客户端"""
@@ -100,11 +177,6 @@ class LLMClient:
             logger.error("未安装zhipuai包，请运行: pip install zhipuai")
             raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True
-    )
     async def complete(
         self,
         messages: List[Dict[str, str]],
@@ -127,87 +199,117 @@ class LLMClient:
         temp = temperature or self.temperature
         max_tok = max_tokens or self.max_tokens
 
-        # 开始追踪
-        trace_id = self.tracer.start_trace(
-            LayerType.LLM_CLIENT,
-            "complete",
-            {
-                "provider": self.provider,
-                "model": self.model,
-                "message_count": len(messages),
-                "temperature": temp,
-                "max_tokens": max_tok
-            }
-        )
+        prompt_text = "\n".join([m.get("content", "") for m in messages])
+        prompt_tokens = len(prompt_text) // 4  # 粗略估算
+        last_error: Optional[Exception] = None
 
-        start_time = datetime.now()
-        error = False
-        retry_count = 0
-
-        try:
-            if self.provider in ['kimi', 'openai']:
-                result = await self._call_openai_compatible(messages, temp, max_tok)
-            elif self.provider == 'zhipuai':
-                result = await self._call_zhipuai(messages, temp, max_tok)
-            else:
-                raise ValueError(f"不支持的提供商: {self.provider}")
-
-            # 计算延迟
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-
-            # 估算token数量 (简化估算: 中文字符数 + 英文单词数)
-            prompt_text = "\n".join([m.get("content", "") for m in messages])
-            prompt_tokens = len(prompt_text) // 4  # 粗略估算
-            completion_tokens = len(result) // 4
-            total_tokens = prompt_tokens + completion_tokens
-
-            # 记录指标
-            self.metrics.record_api_call(
-                provider=self.provider,
-                model=self.model,
-                tokens=total_tokens,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=duration_ms,
-                error=False,
-                retry=retry_count > 0
-            )
-
-            # 结束追踪
-            self.tracer.end_trace(
-                trace_id,
-                TraceStatus.COMPLETED,
+        for attempt in range(1, self.max_attempts + 1):
+            trace_id = self.tracer.start_trace(
+                LayerType.LLM_CLIENT,
+                "complete",
                 {
-                    "duration_ms": duration_ms,
-                    "tokens": total_tokens,
-                    "result_length": len(result)
-                }
+                    "provider": self.provider,
+                    "model": self.model,
+                    "message_count": len(messages),
+                    "temperature": temp,
+                    "max_tokens": max_tok,
+                    "attempt": attempt,
+                },
             )
-
-            return result
-
-        except Exception as e:
-            error = True
-            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
-
-            # 记录失败指标
-            self.metrics.record_api_call(
-                provider=self.provider,
-                model=self.model,
-                latency_ms=duration_ms,
-                error=True,
-                retry=retry_count > 0
+            self.runtime_monitor.log_event(
+                stage="llm",
+                status="started",
+                message=f"LLM调用开始 (attempt {attempt}/{self.max_attempts})",
+                metadata={
+                    "provider": self.provider,
+                    "model": self.model,
+                    "temperature": temp,
+                    "max_tokens": max_tok,
+                },
             )
+            start_time = datetime.now()
 
-            # 结束追踪
-            self.tracer.end_trace(
-                trace_id,
-                TraceStatus.FAILED,
-                error=str(e)
-            )
+            try:
+                if self.provider in ["kimi", "openai"]:
+                    result = await self._wait_with_heartbeat(
+                        self._call_openai_compatible(messages, temp, max_tok),
+                        attempt=attempt,
+                    )
+                elif self.provider == "zhipuai":
+                    result = await self._wait_with_heartbeat(
+                        self._call_zhipuai(messages, temp, max_tok),
+                        attempt=attempt,
+                    )
+                else:
+                    raise ValueError(f"不支持的提供商: {self.provider}")
 
-            logger.error(f"LLM调用失败: {e}")
-            raise
+                duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+                completion_tokens = len(result) // 4
+                total_tokens = prompt_tokens + completion_tokens
+
+                self.metrics.record_api_call(
+                    provider=self.provider,
+                    model=self.model,
+                    tokens=total_tokens,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    latency_ms=duration_ms,
+                    error=False,
+                    retry=attempt > 1,
+                )
+                self.tracer.end_trace(
+                    trace_id,
+                    TraceStatus.COMPLETED,
+                    {
+                        "duration_ms": duration_ms,
+                        "tokens": total_tokens,
+                        "result_length": len(result),
+                        "attempt": attempt,
+                    },
+                )
+                self.runtime_monitor.log_event(
+                    stage="llm",
+                    status="completed",
+                    message=f"LLM调用完成 (attempt {attempt})",
+                    metadata={
+                        "duration_ms": round(duration_ms, 2),
+                        "tokens": total_tokens,
+                    },
+                )
+                return result
+
+            except Exception as e:
+                last_error = e
+                duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+                self.metrics.record_api_call(
+                    provider=self.provider,
+                    model=self.model,
+                    latency_ms=duration_ms,
+                    error=True,
+                    retry=attempt > 1,
+                )
+                self.tracer.end_trace(trace_id, TraceStatus.FAILED, error=str(e))
+                self.runtime_monitor.log_event(
+                    stage="llm",
+                    status="failed",
+                    message=f"LLM调用失败 (attempt {attempt}): {e}",
+                    metadata={"duration_ms": round(duration_ms, 2)},
+                )
+
+                if attempt >= self.max_attempts:
+                    logger.error(f"LLM调用失败: {e}")
+                    raise
+
+                backoff_seconds = min(10, self.backoff_factor ** attempt)
+                self._notify_progress(
+                    f"LLM调用失败，{backoff_seconds}s后自动重试 "
+                    f"(attempt {attempt}/{self.max_attempts})"
+                )
+                await asyncio.sleep(backoff_seconds)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("LLM调用失败")
 
     async def _call_openai_compatible(
         self,
@@ -216,15 +318,23 @@ class LLMClient:
         max_tokens: int
     ) -> str:
         """调用OpenAI兼容API"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _call():
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            try:
+                response = self.client.chat.completions.create(
+                    **kwargs,
+                    timeout=self.request_timeout_seconds,
+                )
+            except TypeError:
+                # 兼容不支持timeout参数的SDK版本
+                response = self.client.chat.completions.create(**kwargs)
             return response.choices[0].message.content
 
         return await loop.run_in_executor(None, _call)
@@ -236,15 +346,22 @@ class LLMClient:
         max_tokens: int
     ) -> str:
         """调用智谱AI API"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _call():
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            try:
+                response = self.client.chat.completions.create(
+                    **kwargs,
+                    timeout=self.request_timeout_seconds,
+                )
+            except TypeError:
+                response = self.client.chat.completions.create(**kwargs)
             return response.choices[0].message.content
 
         return await loop.run_in_executor(None, _call)

@@ -48,6 +48,16 @@ python -m biography write
 python -m biography write --id <项目ID>
 ```
 
+### 6. 查看运行态监控
+
+```bash
+# 查看项目状态（含运行阶段、最后消息、监控文件路径）
+python -m biography status --id <项目ID>
+
+# 不依赖outline，直接查看最近一次运行态（适合init阶段排障）
+python -m biography runtime-status --id <项目ID> --tail 10
+```
+
 ## 可用写作风格
 
 | 风格ID | 名称 | 特点 |
@@ -99,6 +109,22 @@ output/<书名>_<日期>/
     ├── 01_童年时光.md
     ├── 02_求学之路.md
     └── ...
+```
+
+运行时监控文件位于：
+
+```
+.observability/runs/<run_id>/
+├── status.json              # 当前阶段、最后消息、事件计数
+├── events.jsonl             # 结构化事件流（started/running/heartbeat/completed/failed）
+├── artifacts_manifest.json  # 节点产物清单（可直接用于整合分析）
+└── artifacts/
+    ├── 01_data_ingestion/*.json
+    ├── 02_knowledge_memory/*.json
+    ├── 03_planning/*.json
+    ├── 04_generation/*.json
+    ├── 05_review/*.json
+    └── 06_output/*.json
 ```
 
 ## 技术特点
