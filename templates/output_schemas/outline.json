@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BookOutline",
+  "description": "书籍大纲的输出格式",
+  "type": "object",
+  "required": ["title", "subject_name", "style", "total_chapters", "chapters"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "书籍标题"
+    },
+    "subtitle": {
+      "type": ["string", "null"],
+      "description": "副标题"
+    },
+    "subject_name": {
+      "type": "string",
+      "description": "传主姓名"
+    },
+    "style": {
+      "type": "string",
+      "enum": ["documentary", "literary", "investigative", "memoir"],
+      "description": "写作风格"
+    },
+    "total_chapters": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "总章节数"
+    },
+    "target_total_words": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "目标总字数"
+    },
+    "chapters": {
+      "type": "array",
+      "description": "章节大纲列表",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "order", "sections"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "order": {"type": "integer"},
+          "summary": {"type": "string"},
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "title", "target_words"],
+              "properties": {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "target_words": {"type": "integer"},
+                "content_summary": {"type": "string"},
+                "emotional_tone": {"type": "string"},
+                "pacing": {
+                  "type": "string",
+                  "enum": ["slow", "moderate", "fast", "mixed"]
+                },
+                "key_events": {
+                  "type": "array",
+                  "items": {"type": "string"}
+                },
+                "paragraphs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "order": {"type": "integer"},
+                      "paragraph_type": {
+                        "type": "string",
+                        "enum": ["narrative", "dialogue", "description", "reflection"]
+                      },
+                      "content_purpose": {"type": "string"},
+                      "target_words": {"type": "integer"},
+                      "key_details": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                      },
+                      "sensory_focus": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "time_period_start": {"type": ["string", "null"]},
+          "time_period_end": {"type": ["string", "null"]},
+          "characters_present": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        }
+      }
+    },
+    "prologue": {"type": "string"},
+    "epilogue": {"type": "string"}
+  }
+}

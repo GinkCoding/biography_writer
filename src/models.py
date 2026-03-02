@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class WritingStyle(str, Enum):
@@ -82,6 +82,28 @@ class Event(BaseModel):
 
         return "\n".join(parts)
 
+    @field_validator('characters_involved', 'causes', 'consequences', 'themes', mode='before')
+    @classmethod
+    def ensure_list(cls, v):
+        """确保字段值为列表，如果是字符串则转换为单元素列表"""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v] if v.strip() else []
+        if isinstance(v, list):
+            return v
+        return [str(v)]
+
+    @field_validator('sensory_details', 'character_reactions', mode='before')
+    @classmethod
+    def ensure_dict(cls, v):
+        """确保字段值为字典，如果是字符串则转换为空字典"""
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        return {}
+
 
 class Relationship(BaseModel):
     """人物关系"""
@@ -136,6 +158,22 @@ class CharacterProfile(BaseModel):
     life_philosophy: Optional[str] = None  # 人生哲学/感悟
     regrets: List[str] = []  # 遗憾/未竟之事
     proudest_moments: List[str] = []  # 最自豪的时刻
+    sensory_details_exist: bool = False  # 是否存在感官细节
+
+    @field_validator('aliases', 'occupation', 'education_background', 'skills', 'career_highlights',
+                     'personality_traits', 'core_values', 'beliefs', 'habits', 'quirks',
+                     'habitual_actions', 'catchphrases', 'language_quirks', 'regrets', 'proudest_moments',
+                     mode='before')
+    @classmethod
+    def ensure_list(cls, v):
+        """确保字段值为列表，如果是字符串则转换为单元素列表"""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v] if v.strip() else []
+        if isinstance(v, list):
+            return v
+        return [str(v)]
 
     # 时代与环境
     social_background: Optional[str] = None  # 社会背景（阶层、环境）
@@ -176,7 +214,8 @@ class Timeline(BaseModel):
     events: List[Event] = []
     time_range_start: Optional[str] = None
     time_range_end: Optional[str] = None
-    
+    metadata: Optional[Dict] = None  # 元数据，用于存储时间空白期等信息
+
     def sort_events(self):
         """按时间排序事件"""
         self.events.sort(key=lambda e: e.date or "")

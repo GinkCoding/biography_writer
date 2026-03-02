@@ -1,4 +1,10 @@
-"""第五层：审校与输出层 (Review & Output)"""
+"""第五层：审校与输出层 (Review & Output)
+
+提示词模板系统版本：
+- 使用Jinja2模板引擎管理审校提示词
+- 支持六维并行审查
+- 结构化输出格式
+"""
 import json
 import re
 import difflib
@@ -9,11 +15,18 @@ from loguru import logger
 
 from src.llm_client import LLMClient
 from src.models import (
-    GeneratedSection, GeneratedChapter, BookOutline,
+    GeneratedSection, GeneratedChapter, BookOutline, ChapterOutline,
     Timeline, FactCheckResult, BiographyBook, CharacterProfile
 )
 from src.utils import save_json, count_chinese_words, sanitize_filename
 from src.generator.book_finalizer import BookFinalizer, ChapterVersion
+from src.prompt_manager import PromptManager, get_prompt_manager, ContextLevel
+
+# 六维并行审查系统
+from src.checkers import (
+    ParallelReview, ParallelReviewResult, ReviewDimension,
+    quick_review, BaseChecker, ReviewReport, ReviewIssue, IssueSeverity
+)
 
 
 # AI占位符和模板化内容检测规则
@@ -1916,14 +1929,16 @@ class OutputFormatter:
 
 
 class ReviewOutputLayer:
-    """审校与输出层主类"""
+    """审校与输出层主类 - 使用六维并行审查系统"""
 
     def __init__(
         self,
         llm: LLMClient,
         timeline: Timeline,
         output_dir: Path,
-        enable_version_selection: bool = True
+        enable_version_selection: bool = True,
+        prompt_manager: Optional[PromptManager] = None,
+        enable_six_dimension_review: bool = True
     ):
         self.llm = llm
         self.timeline = timeline
@@ -1931,9 +1946,22 @@ class ReviewOutputLayer:
         self.cross_chapter_checker = CrossChapterConsistencyChecker(llm)
         self.formatter = OutputFormatter(output_dir)
 
+        # 提示词管理器
+        self.prompt_manager = prompt_manager or get_prompt_manager()
+
+        # 六维并行审查系统
+        self.enable_six_dimension_review = enable_six_dimension_review
+        self.six_dimension_reviewer: Optional[ParallelReview] = None
+        if enable_six_dimension_review:
+            self.six_dimension_reviewer = ParallelReview(max_workers=6)
+            logger.info("六维并行审查系统已启用")
+
         # 跨章节状态追踪
         self._previous_chapter: Optional[GeneratedChapter] = None
         self._generated_chapters: List[GeneratedChapter] = []
+
+        # 六维审查结果缓存
+        self._six_dimension_results: Dict[str, ParallelReviewResult] = {}
 
         # 版本选择器（用于多版本选择和终版生成）
         self.enable_version_selection = enable_version_selection
@@ -1941,7 +1969,72 @@ class ReviewOutputLayer:
         if enable_version_selection:
             self.book_finalizer = BookFinalizer(output_dir)
         self._chapter_versions: Dict[int, List[GeneratedChapter]] = {}
-    
+
+    def _build_review_prompt(
+        self,
+        review_type: str,
+        content: str,
+        context: Optional[Dict] = None,
+        context_level: ContextLevel = ContextLevel.L1_ESSENTIAL
+    ) -> str:
+        """
+        使用模板系统构建审校提示词
+
+        Args:
+            review_type: 审校类型 (continuity/fact_check/quality/placeholder_check)
+            content: 待审校内容
+            context: 额外上下文
+            context_level: 上下文级别
+
+        Returns:
+            str: 审校提示词
+        """
+        ctx = context or {}
+        ctx['content'] = content
+        ctx['content_level'] = context_level.value
+
+        try:
+            return self.prompt_manager.render_review_prompt(
+                review_type=review_type,
+                context=ctx,
+                context_level=context_level
+            )
+        except Exception as e:
+            logger.warning(f"模板渲染失败，使用回退方案: {e}")
+            # 回退到基础提示词
+            return self._build_fallback_review_prompt(review_type, content, context)
+
+    def _build_fallback_review_prompt(
+        self,
+        review_type: str,
+        content: str,
+        context: Optional[Dict] = None
+    ) -> str:
+        """构建回退审校提示词"""
+        prompts = {
+            "continuity": f"""请检查以下内容的连续性：
+
+{content[:1000]}
+
+检查时间、人物、场景、情节的连续性，返回发现的问题。""",
+            "fact_check": f"""请核查以下内容的准确性：
+
+{content[:1000]}
+
+检查时间、地点、人物、事件、数字的准确性，返回发现的问题。""",
+            "quality": f"""请评估以下内容的写作质量：
+
+{content[:1000]}
+
+检查语言、描写、叙事、情感、风格，返回发现的问题。""",
+            "placeholder_check": f"""请检测以下内容是否有AI占位符：
+
+{content[:1000]}
+
+检测占位符、模板套话、空泛表述、情感标签、悬念套路，返回发现的问题。"""
+        }
+        return prompts.get(review_type, prompts["quality"])
+
     async def review_chapter(
         self,
         chapter: GeneratedChapter,
@@ -2004,6 +2097,10 @@ class ReviewOutputLayer:
                 if transition:
                     chapter.transition_paragraph = transition
 
+        # 六维并行审查
+        if self.enable_six_dimension_review and self.six_dimension_reviewer:
+            await self._run_six_dimension_review(chapter, chapter_context, previous_chapter)
+
         # 更新内部状态
         self._previous_chapter = chapter
         self._generated_chapters.append(chapter)
@@ -2019,6 +2116,112 @@ class ReviewOutputLayer:
             self.add_chapter_version(chapter)
 
         return chapter
+
+    async def _run_six_dimension_review(
+        self,
+        chapter: GeneratedChapter,
+        chapter_context: Dict,
+        previous_chapter: Optional[GeneratedChapter] = None
+    ):
+        """执行六维并行审查"""
+        logger.info("开始六维并行审查...")
+
+        # 构建章节完整内容
+        chapter_content = chapter.full_content
+        chapter_id = f"chapter_{chapter.outline.order}"
+
+        # 构建审查上下文
+        review_context = {
+            "chapter_id": chapter_id,
+            "chapter_title": chapter.outline.title,
+            "previous_chapters": [
+                {"chapter_id": f"chapter_{c.outline.order}", "content": c.full_content}
+                for c in self._generated_chapters[-3:]  # 最近3章
+            ],
+            "character_profiles": chapter_context.get("character_profiles", {}),
+            "subject_profile": chapter_context.get("subject_profile", {}),
+            "timeline": chapter_context.get("timeline", []),
+            "book_outline": chapter_context.get("book_outline", {}),
+            "established_facts": chapter_context.get("established_facts", []),
+            "active_plot_threads": chapter_context.get("active_plot_threads", []),
+        }
+
+        try:
+            # 执行六维并行审查
+            result = self.six_dimension_reviewer.review(chapter_content, review_context)
+
+            # 缓存结果
+            self._six_dimension_results[chapter_id] = result
+
+            # 记录审查结果
+            logger.info(
+                f"六维审查完成: 综合得分={result.overall_score}, "
+                f"问题数={result.total_issues_count}, "
+                f"耗时={result.review_duration_ms}ms"
+            )
+
+            # 将六维审查发现的问题合并到章节中
+            self._merge_six_dimension_issues(chapter, result)
+
+            # 生成六维审查报告
+            report = self.six_dimension_reviewer.generate_review_summary(result)
+            logger.info(f"\n{report}")
+
+        except Exception as e:
+            logger.error(f"六维并行审查失败: {e}")
+
+    def _merge_six_dimension_issues(
+        self,
+        chapter: GeneratedChapter,
+        result: ParallelReviewResult
+    ):
+        """将六维审查发现的问题合并到章节中"""
+        if not result.aggregated_issues:
+            return
+
+        # 只将严重和高优先级问题合并到第一节
+        if chapter.sections:
+            first_section = chapter.sections[0]
+
+            for issue in result.aggregated_issues:
+                if issue.severity in (IssueSeverity.CRITICAL, IssueSeverity.HIGH):
+                    issue_text = f"[六维审查-{issue.dimension}] {issue.description}"
+                    if issue.suggestion:
+                        issue_text += f" (建议: {issue.suggestion})"
+                    first_section.issues.append(issue_text)
+
+        # 更新章节元数据
+        if not chapter.metadata:
+            chapter.metadata = {}
+
+        chapter.metadata["six_dimension_review"] = {
+            "overall_score": result.overall_score,
+            "dimension_scores": {
+                dim: report.dimension_scores.get(dim).score if report.dimension_scores.get(dim) else 0
+                for dim, report in result.dimension_reports.items()
+            },
+            "critical_issues": result.critical_issues_count,
+            "high_priority_issues": result.high_priority_issues_count,
+            "total_issues": result.total_issues_count,
+            "review_timestamp": result.timestamp.isoformat()
+        }
+
+    def get_six_dimension_report(self, chapter_order: int) -> Optional[str]:
+        """获取指定章节的六维审查报告"""
+        chapter_id = f"chapter_{chapter_order}"
+        result = self._six_dimension_results.get(chapter_id)
+
+        if result and self.six_dimension_reviewer:
+            return self.six_dimension_reviewer.generate_review_summary(result)
+
+        return None
+
+    def get_all_six_dimension_results(self) -> Dict[str, Dict]:
+        """获取所有六维审查结果"""
+        return {
+            chapter_id: result.to_dict()
+            for chapter_id, result in self._six_dimension_results.items()
+        }
 
     def add_chapter_version(self, chapter: GeneratedChapter, quality_score: Optional[float] = None):
         """
@@ -2036,7 +2239,15 @@ class ReviewOutputLayer:
             quality_score = word_ratio * 5 + verified_bonus * 5
 
         self.book_finalizer.add_chapter_version(chapter, quality_score)
-        logger.info(f"第{chapter.outline.order}章已添加到版本池，评分: {quality_score:.1f}")
+
+        # 同时更新本地版本历史
+        chapter_order = chapter.outline.order
+        if chapter_order not in self._chapter_versions:
+            self._chapter_versions[chapter_order] = []
+        self._chapter_versions[chapter_order].append(chapter)
+
+        logger.info(f"第{chapter.outline.order}章已添加到版本池，评分: {quality_score:.1f}, "
+                   f"该章节历史版本数: {len(self._chapter_versions[chapter_order])}")
 
     def regenerate_chapter(self, chapter_order: int) -> Optional[GeneratedChapter]:
         """

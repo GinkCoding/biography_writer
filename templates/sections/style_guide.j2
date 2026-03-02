@@ -1,0 +1,114 @@
+{# 风格指南片段 #}
+{# 变量: style, style_config #}
+
+{% set style_guides = {
+  "documentary": {
+    "name": "纪实风格",
+    "description": "客观、真实、详尽的记录风格，注重事实准确性",
+    "characteristics": [
+      "以时间为线索，按时间顺序叙述",
+      "注重事实细节和数据",
+      "语言平实，避免过度修饰",
+      "引用来源明确标注",
+      "保持客观中立的叙述视角"
+    ],
+    "sentence_patterns": [
+      "使用简洁直接的陈述句",
+      "避免过多形容词堆砌",
+      "时间、地点、人物信息前置"
+    ],
+    "paragraph_structure": [
+      "每段聚焦一个事件或主题",
+      "段落间时间逻辑清晰",
+      "重要事实独立成段"
+    ]
+  },
+  "literary": {
+    "name": "文学风格",
+    "description": "注重文学性和艺术性的写作风格，强调叙事美感",
+    "characteristics": [
+      "注重场景氛围营造",
+      "运用多种修辞手法",
+      "心理描写细腻深入",
+      "语言富有节奏感和韵律",
+      "叙事视角灵活多变"
+    ],
+    "sentence_patterns": [
+      "长短句结合，形成节奏",
+      "适当使用排比、对偶",
+      "感官描写丰富细腻"
+    ],
+    "paragraph_structure": [
+      "段落长度有变化，形成韵律",
+      "场景转换自然流畅",
+      "情感高潮独立成段"
+    ]
+  },
+  "investigative": {
+    "name": "调查风格",
+    "description": "类似深度报道的写作风格，注重挖掘和揭示",
+    "characteristics": [
+      "以问题为导向展开叙述",
+      "多方视角交叉印证",
+      "注重因果关系分析",
+      "背景信息充分",
+      "结论基于证据"
+    ],
+    "sentence_patterns": [
+      "使用设问引发思考",
+      "证据陈述清晰有力",
+      "因果逻辑明确"
+    ],
+    "paragraph_structure": [
+      "论点-论据-论证结构",
+      "对比段落并置呈现",
+      "结论段落总结有力"
+    ]
+  },
+  "memoir": {
+    "name": "回忆录风格",
+    "description": "第一人称回忆式叙述，亲切自然",
+       "characteristics": [
+      "第一人称叙述视角",
+      "时间跳跃灵活",
+      "情感真挚自然",
+      "细节生动具体",
+      "带有回顾性思考"
+    ],
+    "sentence_patterns": [
+      "使用回忆性语句开头",
+      "现在与过去交织",
+      "内心独白与叙述结合"
+    ],
+    "paragraph_structure": [
+      "回忆片段独立成段",
+      "情感段落集中抒发",
+      "思考段落升华主题"
+    ]
+  }
+} %}
+
+{% set current_style = style_guides.get(style, style_guides["documentary"]) %}
+
+=== 风格指南：{{ current_style.name }} ===
+{{ current_style.description }}
+
+【风格特征】
+{% for char in current_style.characteristics %}
+- {{ char }}
+{% endfor %}
+
+【句式特点】
+{% for pattern in current_style.sentence_patterns %}
+- {{ pattern }}
+{% endfor %}
+
+【段落结构】
+{% for structure in current_style.paragraph_structure %}
+- {{ structure }}
+{% endfor %}
+
+{% if style_config %}
+【自定义配置】
+{{ style_config | tojson(indent=2) }}
+{% endif %}

@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GeneratedChapter",
+  "description": "生成章节的输出格式",
+  "type": "object",
+  "required": ["id", "outline", "sections"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "章节唯一标识"
+    },
+    "outline": {
+      "type": "object",
+      "description": "章节大纲信息",
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "order": {"type": "integer"},
+        "summary": {"type": "string"}
+      }
+    },
+    "sections": {
+      "type": "array",
+      "description": "章节包含的小节",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "content", "word_count"],
+        "properties": {
+          "id": {"type": "string"},
+          "chapter_id": {"type": "string"},
+          "title": {"type": "string"},
+          "content": {
+            "type": "string",
+            "description": "小节正文内容",
+            "minLength": 100
+          },
+          "word_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "generation_time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "transition_paragraph": {
+      "type": ["string", "null"],
+      "description": "章节过渡段落"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "章节元数据",
+      "properties": {
+        "generation_time": {"type": "string", "format": "date-time"},
+        "total_word_count": {"type": "integer"},
+        "style": {"type": "string"},
+        "context_level": {"type": "string"}
+      }
+    }
+  }
+}

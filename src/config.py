@@ -43,10 +43,10 @@ class EmbeddingConfig(BaseSettings):
     
     # 硅基流动配置
     siliconflow_api_key: str = ""
-    siliconflow_model: str = "BAAI/bge-large-zh-v1.5"
+    siliconflow_model: str = "BAAI/bge-m3"
     
     # SentenceTransformer配置
-    model: str = "BAAI/bge-small-zh-v1.5"
+    model: str = "BAAI/bge-m3"
     
     # OpenAI配置
     openai_api_key: str = ""
@@ -69,6 +69,31 @@ class VectorDBConfig(BaseSettings):
     collection_name: str = "biography_materials"
     chunk_size: int = 1000
     chunk_overlap: int = 200
+
+
+class HybridRetrievalConfig(BaseSettings):
+    """混合检索配置"""
+    # RRF融合参数
+    rrf_k: int = 60  # RRF公式中的k值，通常取60
+
+    # 检索Top-K配置
+    vector_top_k: int = 20  # 向量检索召回数量
+    bm25_top_k: int = 20    # BM25检索召回数量
+    rerank_top_n: int = 10  # 最终返回结果数量
+
+    # BM25参数
+    bm25_k1: float = 1.5    # BM25词频饱和度参数
+    bm25_b: float = 0.75    # BM25文档长度归一化参数
+
+    # Rerank配置
+    enable_rerank: bool = True  # 是否启用重排序
+    rerank_provider: str = "siliconflow"  # 重排序提供器: siliconflow/local
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"  # 重排序模型
+
+    # 父子索引配置
+    enable_parent_child: bool = True  # 是否启用父子索引
+    parent_chunk_size: int = 2000     # 父块（摘要）大小
+    child_chunk_size: int = 1000      # 子块（场景）大小
 
 
 class RetryConfig(BaseSettings):
@@ -95,6 +120,7 @@ class Settings(BaseSettings):
     paths: PathConfig = Field(default_factory=PathConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     vector_db: VectorDBConfig = Field(default_factory=VectorDBConfig)
+    hybrid_retrieval: HybridRetrievalConfig = Field(default_factory=HybridRetrievalConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     

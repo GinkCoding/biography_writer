@@ -8,8 +8,8 @@
 """
 from .data_ingestion import DataIngestionLayer
 from .knowledge_memory import KnowledgeMemoryLayer
-from .planning import PlanningLayer
-from .generation import ContextAssembler, ContentGenerationEngine, IterativeGenerationLayer
+from .planning import PlanningOrchestrationLayer as PlanningLayer
+from .generation import ContentGenerationEngine, IterativeGenerationLayer
 from .review_output import ReviewOutputLayer, DualAgentReviewer, OutputFormatter
 
 __all__ = [

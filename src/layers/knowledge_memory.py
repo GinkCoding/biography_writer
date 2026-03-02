@@ -5,13 +5,19 @@ from pathlib import Path
 from dataclasses import dataclass, field
 import networkx as nx
 from loguru import logger
+from datetime import datetime
 
 from src.llm_client import LLMClient
 from src.models import (
-    Event, Relationship, CharacterProfile, Timeline, 
+    Event, Relationship, CharacterProfile, Timeline,
     GlobalState, WritingStyle, InterviewMaterial
 )
 from src.utils import normalize_date, generate_id, calculate_age, save_json, load_json
+from src.config import settings
+
+# 导入新的三层存储架构
+from src.storage.state_manager import StateManager, CharacterSnapshot, WritingProgress
+from src.storage.index_manager import IndexManager, EntityMeta, RelationshipMeta, TimelineEventMeta
 
 
 @dataclass
@@ -245,7 +251,7 @@ class EntityRelationExtractor:
                     character_reactions=e.get("character_reactions", {}),
                     location=e.get("location"),
                     location_details=e.get("location_details"),
-                    sensory_details=e.get("sensory_details", {}),
+                    sensory_details=_normalize_sensory_details(e.get("sensory_details", {})),
                     importance=e.get("importance", 5),
                     event_type=e.get("event_type", "life_event"),
                     causes=e.get("causes", []),
@@ -343,10 +349,25 @@ class TimelineBuilder:
                 year_events[year].append(event)
         
         # 找出空白期（超过3年没有事件）
-        years = sorted(year_events.keys())
+        import re
+        def extract_year(y):
+            """从字符串中提取年份数字"""
+            if isinstance(y, int):
+                return y
+            # 尝试匹配4位年份
+            match = re.search(r'\d{4}', str(y))
+            if match:
+                return int(match.group())
+            return None
+
+        years = sorted([y for y in year_events.keys() if extract_year(y) is not None],
+                       key=lambda x: extract_year(x))
         gaps = []
         for i in range(len(years) - 1):
-            y1, y2 = int(years[i]), int(years[i + 1])
+            y1_val, y2_val = extract_year(years[i]), extract_year(years[i + 1])
+            if y1_val is None or y2_val is None:
+                continue
+            y1, y2 = int(y1_val), int(y2_val)
             if y2 - y1 > 3:
                 gaps.append((y1, y2))
         
@@ -429,13 +450,33 @@ class KnowledgeGraph:
 
 
 class GlobalStateManager:
-    """全局状态管理器 - 支持增强版状态"""
+    """全局状态管理器 - 支持增强版状态和三层存储架构
 
-    def __init__(self, book_id: str, cache_dir: Path, use_enhanced: bool = True):
+    此类现在整合了三层存储架构：
+    - state.json: 通过 StateManager 管理精简状态
+    - index.db: 通过 IndexManager 管理实体、关系、时间线
+    """
+
+    def __init__(
+        self,
+        book_id: str,
+        cache_dir: Optional[Path] = None,
+        use_enhanced: bool = True,
+        use_new_storage: bool = True
+    ):
         self.book_id = book_id
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir = Path(cache_dir) if cache_dir else Path(settings.paths.cache_dir)
         self.cache_file = self.cache_dir / f"{book_id}_state.json"
         self.use_enhanced = use_enhanced
+        self.use_new_storage = use_new_storage
+
+        # 新的存储架构
+        if use_new_storage:
+            self._state_manager = StateManager(book_id, self.cache_dir)
+            self._index_manager = IndexManager(book_id, self.cache_dir)
+        else:
+            self._state_manager = None
+            self._index_manager = None
 
         # 根据配置选择状态类型
         if use_enhanced:
@@ -463,11 +504,53 @@ class GlobalStateManager:
                 if self.use_enhanced and hasattr(self.state, 'register_character'):
                     self.state.register_character(name=char)
 
+        # 同步到新的存储架构
+        if self.use_new_storage and self._index_manager:
+            self._sync_timeline_to_index(timeline)
+
+    def _sync_timeline_to_index(self, timeline: Timeline):
+        """将时间线数据同步到 IndexManager"""
+        # 添加传主实体
+        if timeline.subject:
+            subject_entity = EntityMeta(
+                id=f"person_{timeline.subject.name}",
+                type="person",
+                name=timeline.subject.name,
+                aliases=timeline.subject.aliases or [],
+                description=timeline.subject.to_bio_summary(),
+                attributes={
+                    "birth_date": timeline.subject.birth_date,
+                    "birth_place": timeline.subject.birth_place,
+                    "occupation": timeline.subject.occupation,
+                    "personality_traits": timeline.subject.personality_traits,
+                },
+                importance="major"
+            )
+            self._index_manager.add_entity(subject_entity)
+
+        # 添加时间线事件
+        for event in timeline.events:
+            event_meta = TimelineEventMeta(
+                id=event.id,
+                date=event.date,
+                date_approximate=event.date_approximate,
+                title=event.title,
+                description=event.description,
+                location=event.location or "",
+                characters_involved=event.characters_involved,
+                importance=event.importance,
+                event_type=event.event_type,
+                chapter_id=event.chapter_id
+            )
+            self._index_manager.add_timeline_event(event_meta)
+
+        logger.info(f"已同步 {len(timeline.events)} 个事件到索引数据库")
+
     def update_for_chapter(
         self,
         chapter_order: int,
-        chapter_time_start: Optional[str],
-        chapter_time_end: Optional[str]
+        chapter_time_start: Optional[str] = None,
+        chapter_time_end: Optional[str] = None
     ):
         """更新到新的章节状态"""
         self.state.current_chapter_idx = chapter_order
@@ -480,9 +563,17 @@ class GlobalStateManager:
                 age = calculate_age(birth, chapter_time_start)
                 self.state.current_subject_age = age
 
+        # 同步到新存储
+        if self.use_new_storage and self._state_manager:
+            self._state_manager.update_progress(chapter_order, 0)
+
     def add_chapter_summary(self, summary: str):
         """添加章节摘要到记忆"""
         self.state.add_chapter_summary(summary)
+
+        # 同步到新存储
+        if self.use_new_storage and self._state_manager:
+            self._state_manager.update_recent_summaries(summary)
 
     def get_context_for_generation(self) -> Dict[str, Any]:
         """获取生成所需的上下文信息"""
@@ -527,10 +618,55 @@ class GlobalStateManager:
 
     def save(self):
         """保存状态到文件"""
+        # 保存到旧格式（向后兼容）
         save_json(self.state.model_dump(), self.cache_file)
+
+        # 同步到新存储架构
+        if self.use_new_storage and self._state_manager:
+            self._sync_to_new_state_manager()
+
+    def _sync_to_new_state_manager(self):
+        """同步状态到新的 StateManager"""
+        if not self._state_manager:
+            return
+
+        # 确保状态已初始化
+        if self._state_manager.state is None:
+            self._state_manager.init_state(
+                book_title=getattr(self.state, 'book_title', self.book_id),
+                subject_name=self.state.subject_profile.name if self.state.subject_profile else "",
+                writing_style=getattr(self.state, 'writing_style', 'literary'),
+                total_chapters=getattr(self.state, 'total_chapters', 25)
+            )
+
+        # 更新进度
+        self._state_manager.update_progress(
+            self.state.current_chapter_idx,
+            self.state.current_section_idx
+        )
+
+        # 同步人物快照
+        if self.state.subject_profile:
+            snapshot = CharacterSnapshot(
+                name=self.state.subject_profile.name,
+                age=self.state.current_subject_age,
+                key_traits=self.state.subject_profile.personality_traits[:5] if self.state.subject_profile.personality_traits else [],
+                current_status="active"
+            )
+            self._state_manager.add_character_snapshot(snapshot)
 
     def load(self):
         """从文件加载状态"""
+        # 优先尝试从新的存储架构加载
+        if self.use_new_storage and self._state_manager:
+            new_state = self._state_manager.load()
+            if new_state:
+                logger.info(f"从新的存储架构加载状态: {self.book_id}")
+                # 同步回旧的状态对象
+                self._sync_from_new_state_manager(new_state)
+                return
+
+        # 回退到旧格式
         if self.cache_file.exists():
             data = load_json(self.cache_file)
             if self.use_enhanced:
@@ -539,6 +675,28 @@ class GlobalStateManager:
             else:
                 self.state = GlobalState(**data)
 
+    def _sync_from_new_state_manager(self, new_state):
+        """从新的 StateManager 同步状态"""
+        self.state.current_chapter_idx = new_state.progress.current_chapter
+        self.state.current_section_idx = new_state.progress.current_section
+        # 其他字段根据需要进行同步
+
+
+
+def _normalize_sensory_details(data):
+    """将 sensory_details 转换为 Dict[str, List[str]] 格式"""
+    if not data:
+        return {}
+    result = {}
+    for key, value in data.items():
+        if isinstance(value, list):
+            result[key] = value
+        elif isinstance(value, str):
+            # 字符串转列表
+            result[key] = [value] if value.strip() else []
+        else:
+            result[key] = []
+    return result
 
 class KnowledgeMemoryLayer:
     """知识构建与全局记忆层主类"""
@@ -706,9 +864,15 @@ class KnowledgeMemoryLayer:
             if profile.growth_turning_points:
                 parts.append("### 关键转折点\n")
                 for tp in profile.growth_turning_points[:5]:
-                    age = tp.get('age', '未知年龄')
-                    event = tp.get('event', '未知事件')
-                    impact = tp.get('impact', '影响未详')
+                    # 处理字典或 Event 对象
+                    if hasattr(tp, 'get'):
+                        age = tp.get('age', '未知年龄')
+                        event = tp.get('event', '未知事件')
+                        impact = tp.get('impact', '影响未详')
+                    else:
+                        age = getattr(tp, 'age', '未知年龄')
+                        event = getattr(tp, 'event', '未知事件')
+                        impact = getattr(tp, 'impact', '影响未详')
                     parts.append(f"- **{age}岁**: {event}")
                     parts.append(f"  - 影响: {impact}\n")
 

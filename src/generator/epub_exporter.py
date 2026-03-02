@@ -1,4 +1,5 @@
 """EPUB 导出器 - 生成格式正确、兼容性好的 EPUB 文件"""
+from __future__ import annotations
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -10,6 +11,7 @@ try:
     EBOOKLIB_AVAILABLE = True
 except ImportError:
     EBOOKLIB_AVAILABLE = False
+    epub = None  # 避免 NameError
     logger.warning("ebooklib 未安装，EPUB 导出功能不可用")
 
 from src.models import BiographyBook, GeneratedChapter

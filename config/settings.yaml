@@ -1,19 +1,19 @@
-# 传记生成器配置文件
+# 传记生成器配置文件 - 硅基流动 GLM-5 (优先使用，余额充足)
 
-# 模型配置 - 使用Kimi，无需API密钥
+# 模型配置
 model:
-  provider: kimi
-  api_key: ""  # 不需要
-  base_url: null
-  model: kimi
-  max_tokens: 4000
+  provider: openai
+  api_key: "sk-mykvsbepjdgheppmqccubburghlbnhoqoxvgfdjzikkufxcn"
+  base_url: "https://api.siliconflow.cn/v1"
+  model: "Pro/zai-org/GLM-5"
+  max_tokens: 32768
   temperature: 0.7
   top_p: 0.9
 
 # 生成参数
 generation:
-  target_length: 10000   # 默认1万字（测试用），正式用100000
-  total_chapters: 5      # 默认5章（测试用），正式用25
+  target_length: 10000
+  total_chapters: 25
   sections_per_chapter: 4
   words_per_section: 500
   style: literary
@@ -25,47 +25,14 @@ paths:
   vector_db_dir: ./.vector_db
   cache_dir: ./.cache
 
-# 向量数据库 & Embedding配置
+# Embedding 配置
 embedding:
-  # Embedding提供器优先级（按顺序尝试）
-  # 可选值: siliconflow, sentence_transformer, openai, tfidf
   priority:
-    - siliconflow      # 推荐：国内API，中文效果好，无需本地下载模型
-    - sentence_transformer  # 本地运行，无需API
-    - openai           # 国际API
-    - tfidf            # 轻量级备选
+    - siliconflow
+    - sentence_transformer
+    - openai
+    - tfidf
   
-  # 硅基流动配置（推荐）
-  # 官网: https://siliconflow.cn
-  # 注册后可获得免费Token额度
-  siliconflow_api_key: ""  # 从 https://siliconflow.cn 获取API密钥
-  siliconflow_model: "BAAI/bge-large-zh-v1.5"  # 推荐模型：中文效果优秀
-  # 其他可选模型:
-  # - "BAAI/bge-m3" (支持8192长度，多语言)
-  # - "netease-youdao/bce-embedding-base_v1" (有道开源)
-  # - "Pro/BAAI/bge-m3" (专业版)
-  
-  # SentenceTransformer配置（本地模型）
-  # 首次使用时会自动下载模型（约200MB-1GB）
-  model: "BAAI/bge-small-zh-v1.5"  # 轻量级中文模型
-  # 其他可选模型:
-  # - "BAAI/bge-large-zh-v1.5" (效果更好但更大)
-  # - "shibing624/text2vec-base-chinese"
-  
-  # OpenAI配置（备选）
-  openai_api_key: ""  # OpenAI API密钥
-  openai_model: "text-embedding-3-small"
-
-# 向量数据库存储配置
-vector_db:
-  collection_name: biography_materials
-  chunk_size: 1000      # 增大到1000字，更好保持事件完整性
-  chunk_overlap: 200    # 增大重叠区域
-
-# 重试与并发
-retry:
-  max_attempts: 3
-  backoff_factor: 2
-  
-concurrency:
-  max_workers: 1  # 使用Kimi时单线程
+  siliconflow:
+    api_key: "sk-mykvsbepjdgheppmqccubburghlbnhoqoxvgfdjzikkufxcn"
+    model: "Qwen/Qwen3-Embedding-8B"

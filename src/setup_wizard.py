@@ -107,7 +107,7 @@ SERVICES = {
         required_packages=["requests"],
         config_fields=[
             {"name": "api_key", "prompt": "请输入 SiliconFlow API Key", "secret": True, "env": "SILICONFLOW_API_KEY"},
-            {"name": "model", "prompt": "Embedding模型", "default": "BAAI/bge-large-zh-v1.5", "env": "SILICONFLOW_MODEL"},
+            {"name": "model", "prompt": "Embedding模型", "default": "BAAI/bge-m3", "env": "SILICONFLOW_MODEL"},
         ],
         env_prefix="SILICONFLOW",
         doc_url="https://siliconflow.cn/",
@@ -119,7 +119,7 @@ SERVICES = {
         description="本地运行Embedding模型 - 无需API，首次下载模型",
         required_packages=["sentence-transformers", "torch"],
         config_fields=[
-            {"name": "model", "prompt": "模型名称", "default": "BAAI/bge-small-zh-v1.5", "env": "SENTENCE_TRANSFORMER_MODEL"},
+            {"name": "model", "prompt": "模型名称", "default": "BAAI/bge-m3", "env": "SENTENCE_TRANSFORMER_MODEL"},
         ],
         env_prefix="SENTENCE_TRANSFORMER",
         doc_url="https://www.sbert.net/",

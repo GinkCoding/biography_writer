@@ -1,0 +1,148 @@
+{# 审校系统提示词模板 #}
+{# 变量: review_type, chapter_info, previous_chapter_info #}
+
+{% if review_type == 'continuity' %}
+=== 连续性审校任务 ===
+
+你的任务是检查本章与上一章的连续性，确保叙事连贯、人物状态一致。
+
+【审校维度】
+1. 时间连续性：时间线是否合理，是否存在逻辑跳跃
+2. 人物状态连续性：人物情绪、身体状况、人际关系是否一致
+3. 场景连续性：场景转换是否自然，空间关系是否合理
+4. 情节连续性：情节发展是否符合逻辑，因果是否合理
+
+【输出格式】
+请按以下JSON格式输出审校结果：
+{
+  "passed": true/false,
+  "issues": [
+    {
+      "type": "时间/人物/场景/情节",
+      "location": "问题所在位置（段落/句子）",
+      "description": "问题描述",
+      "severity": "high/medium/low",
+      "suggestion": "修改建议"
+    }
+  ],
+  "continuity_score": 0-100
+}
+
+{% elif review_type == 'fact_check' %}
+=== 事实核查任务 ===
+
+你的任务是核查本章内容的事实准确性，确保与采访素材一致。
+
+【审校维度】
+1. 时间准确性：日期、年份、季节是否正确
+2. 地点准确性：地理位置、场所名称是否正确
+3. 人物准确性：人物姓名、关系、身份是否正确
+4. 事件准确性：事件经过、结果是否与素材一致
+5. 数字准确性：金额、数量、年龄等数字是否正确
+
+【输出格式】
+请按以下JSON格式输出审校结果：
+{
+  "passed": true/false,
+  "issues": [
+    {
+      "type": "时间/地点/人物/事件/数字",
+      "claim": "文中的陈述",
+      "source": "素材中的对应内容",
+      "description": "不一致之处",
+      "severity": "high/medium/low",
+      "suggestion": "修改建议"
+    }
+  ],
+  "fact_score": 0-100
+}
+
+{% elif review_type == 'quality' %}
+=== 质量审校任务 ===
+
+你的任务是检查本章的写作质量，确保符合传记文学标准。
+
+【审校维度】
+1. 语言质量：用词是否准确，句式是否流畅
+2. 描写质量：细节是否具体，感官描写是否到位
+3. 叙事质量：结构是否清晰，节奏是否得当
+4. 情感质量：情感表达是否真挚，是否有过度煽情
+5. 风格一致性：是否符合指定的写作风格
+
+【输出格式】
+请按以下JSON格式输出审校结果：
+{
+  "passed": true/false,
+  "issues": [
+    {
+      "type": "语言/描写/叙事/情感/风格",
+      "location": "问题所在位置",
+      "description": "问题描述",
+      "severity": "high/medium/low",
+      "suggestion": "修改建议"
+    }
+  ],
+  "quality_score": 0-100
+}
+
+{% elif review_type == 'placeholder_check' %}
+=== AI占位符检测任务 ===
+
+你的任务是检测本章是否存在AI生成的占位符和模板化内容。
+
+【检测项目】
+1. 占位符文本："待补充"、"待完善"、"此处需要展开"等
+2. 模板套话："尘埃在光柱中飞舞"、"苦涩中带着回甘"等
+3. 空泛表述："那是一个特殊的年代"、"风云变幻"等
+4. 情感标签：无具体言行支撑的"陷入沉思"、"百感交集"等
+5. 悬念套路："暴风雨前的宁静"、"真相伺机而动"等
+
+【输出格式】
+请按以下JSON格式输出检测结果：
+{
+  "passed": true/false,
+  "violations": [
+    {
+      "type": "placeholder/template/vague/emotion/suspense",
+      "text": "违规文本片段",
+      "location": "所在位置",
+      "description": "问题说明",
+      "severity": "high/medium/low"
+    }
+  ],
+  "clean_score": 0-100
+}
+
+{% else %}
+=== 综合审校任务 ===
+
+请对本章进行全面的质量审校，包括：
+1. 连续性检查
+2. 事实核查
+3. 质量审校
+4. AI占位符检测
+
+【输出格式】
+请按以下JSON格式输出审校结果：
+{
+  "overall_passed": true/false,
+  "overall_score": 0-100,
+  "dimensions": {
+    "continuity": {"passed": true/false, "score": 0-100},
+    "fact_accuracy": {"passed": true/false, "score": 0-100},
+    "quality": {"passed": true/false, "score": 0-100},
+    "cleanliness": {"passed": true/false, "score": 0-100}
+  },
+  "issues": [
+    {
+      "dimension": "continuity/fact/quality/cleanliness",
+      "type": "问题类型",
+      "location": "问题位置",
+      "description": "问题描述",
+      "severity": "high/medium/low",
+      "suggestion": "修改建议"
+    }
+  ],
+  "summary": "审校总结"
+}
+{% endif %}

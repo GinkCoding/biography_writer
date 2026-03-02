@@ -1,4 +1,14 @@
-"""第四层：迭代生成层 (Iterative Generation)"""
+"""第四层：迭代生成层 (Iterative Generation)
+
+双Agent架构集成版本：
+- Context Agent: 在Generation层之前，组装创作任务书
+- Data Agent: 在Generation层之后，提取数据并同步到存储层
+
+提示词模板系统版本：
+- 使用Jinja2模板引擎管理提示词
+- 支持分层引用披露（L0-L3）
+- 支持风格模板切换
+"""
 import asyncio
 import re
 from typing import List, Dict, Optional, AsyncIterator, Tuple
@@ -9,11 +19,19 @@ from loguru import logger
 from src.llm_client import LLMClient
 from src.models import (
     BookOutline, ChapterOutline, SectionOutline,
-    GeneratedSection, GeneratedChapter, GlobalState,
+    GeneratedSection, GeneratedChapter, GlobalState, EnhancedGlobalState,
     WritingStyle, InterviewMaterial
 )
 from src.layers.data_ingestion import VectorStore
 from src.utils import count_chinese_words, truncate_text, generate_id
+from src.context_assembler import (
+    ProgressiveContextAssembler, ContextLevel, ContextLevelSelector,
+    TokenBudget, LoadedContext
+)
+from src.prompt_manager import PromptManager, get_prompt_manager
+
+# 双Agent架构导入
+from src.agents import ContextAgent, ContextContract, DataAgent, ExtractionResult
 
 
 # AI占位符检测模式
@@ -57,336 +75,19 @@ TEMPLATE_PHRASES = [
 ]
 
 
-class ContextAssembler:
-    """上下文组装器"""
-
-    # 感官描述关键词库
-    SENSORY_KEYWORDS = {
-        "visual": ["看见", "看到", "望", "瞧", "颜色", "光线", "阳光", "影子", "模样", "穿着", "表情", "眼神"],
-        "auditory": ["听见", "听到", "声音", "喊道", "说", "笑声", "哭声", "音乐", "歌声", "噪音", "寂静"],
-        "olfactory": ["闻到", "气味", "香味", "臭味", "气息", "味道", "烟味", "花香", "饭菜香"],
-        "tactile": ["感到", "摸", "触摸", "温度", "冷", "热", "疼痛", "粗糙", "光滑", "柔软", "坚硬"],
-        "gustatory": ["尝到", "味道", "甜", "苦", "辣", "酸", "咸", "好吃", "难吃"],
-    }
-
-    def __init__(self, llm: LLMClient, vector_store: VectorStore):
-        self.llm = llm
-        self.vector_store = vector_store
-    
-    async def assemble_context(
-        self,
-        section: SectionOutline,
-        chapter: ChapterOutline,
-        outline: BookOutline,
-        global_state: Dict,
-        previous_section_summary: Optional[str] = None
-    ) -> Dict[str, str]:
-        """
-        组装完整的生成上下文
-        
-        Returns:
-            包含各部分内容的字典
-        """
-        # 1. 全局设定
-        global_context = self._build_global_context(outline, global_state)
-        
-        # 2. 当前小节大纲
-        section_context = self._build_section_context(section, chapter)
-        
-        # 3. 检索相关素材（增强版）- 返回文本和覆盖率信息
-        material_context, coverage_info = await self._retrieve_materials_enhanced(section, chapter)
-        
-        # 4. 前文衔接
-        continuity_context = self._build_continuity_context(
-            previous_section_summary, global_state
-        )
-        
-        # 5. 时代背景增强
-        era_context = self._build_era_context_enhanced(chapter)
-
-        # 6. 感官描写引导（新增）
-        sensory_details = self._analyze_sensory_details(material_context)
-        sensory_context = self._build_sensory_guidance(sensory_details, outline.style)
-
-        # 7. 素材覆盖率警告
-        if coverage_info.get("coverage_ratio", 0) < 0.3:
-            logger.warning(f"素材覆盖率严重不足: {coverage_info['status']} ({coverage_info['total_materials']}条素材)")
-
-        return {
-            "global": global_context,
-            "section": section_context,
-            "materials": material_context,
-            "continuity": continuity_context,
-            "era": era_context,
-            "sensory": sensory_context,  # 新增感官引导
-            "coverage_info": coverage_info,
-        }
-    
-    def _build_global_context(self, outline: BookOutline, global_state: Dict) -> str:
-        """构建全局上下文"""
-        subject = global_state.get("subject_name", "传主")
-        age = global_state.get("subject_age", "未知")
-        
-        # 获取传记主题描述，避免为空
-        theme_desc = ""
-        if outline.chapters and outline.chapters[0].summary:
-            theme_desc = outline.chapters[0].summary
-        
-        return f"""=== 全局设定 ===
-传记标题: {outline.title}
-传主姓名: {subject}
-当前年龄: {age}岁
-写作风格: {outline.style.value}
-整体进度: {global_state.get('chapter_progress', '')}
-传记主题: {theme_desc or '基于真实采访素材撰写的个人传记'}
-"""
-    
-    def _build_section_context(self, section: SectionOutline, chapter: ChapterOutline) -> str:
-        """构建小节上下文"""
-        # 确保关联事件不为空
-        events_str = ', '.join(section.key_events) if section.key_events else '基于采访素材展开'
-        
-        return f"""=== 当前小节大纲 ===
-章节: {chapter.title} (第{chapter.order}章)
-时间范围: {chapter.time_period_start or '待定'} 至 {chapter.time_period_end or '待定'}
-小节: {section.title}
-目标字数: {section.target_words}字
-内容概要: {section.content_summary}
-情感基调: {section.emotional_tone}
-关联事件: {events_str}
-"""
-    
-    async def _retrieve_materials_enhanced(
-        self,
-        section: SectionOutline,
-        chapter: ChapterOutline
-    ) -> Tuple[str, Dict]:
-        """
-        增强版素材检索 - 多路召回策略
-        
-        Returns:
-            (materials_text, coverage_info)
-        """
-        # 构建多个检索查询
-        queries = [
-            f"{chapter.title} {section.title} {section.content_summary}",
-            f"{chapter.time_period_start} {chapter.time_period_end} {section.key_events[0] if section.key_events else ''}",
-            section.content_summary,
-        ]
-        
-        all_results = []
-        for query in queries:
-            if query.strip():
-                # search返回 [(material, score), ...]
-                results = self.vector_store.search(query, n_results=8)
-                all_results.extend(results)
-        
-        # 按相似度排序并去重
-        all_results.sort(key=lambda x: x[1], reverse=True)
-        
-        seen_ids = set()
-        unique_materials = []
-        for m, score in all_results:
-            if m.id not in seen_ids:
-                seen_ids.add(m.id)
-                unique_materials.append((m, score))
-        
-        # 限制数量但保留更多内容
-        unique_materials = unique_materials[:10]
-        
-        # 计算素材覆盖率
-        high_confidence = len([s for m, s in unique_materials if s > 0.7])
-        medium_confidence = len([s for m, s in unique_materials if 0.5 <= s <= 0.7])
-        coverage_info = {
-            "total_materials": len(unique_materials),
-            "high_confidence": high_confidence,
-            "medium_confidence": medium_confidence,
-            "coverage_ratio": min(len(unique_materials) / 5, 1.0),  # 5个素材视为满覆盖
-        }
-        
-        if not unique_materials:
-            coverage_info["status"] = "严重不足"
-            return """=== 相关素材 ===
-【⚠️ 严重警告】当前小节缺乏直接对应的采访素材。请基于已有章节上下文和时代背景进行合理推演，但必须：
-1. 不虚构具体的人名、地名、机构名
-2. 不编造具体的数字和数据
-3. 如需补充细节，使用"据回忆"、"大约是"等模糊表述
-4. 禁止使用"待补充"、"此处需要展开"等占位符
-""", coverage_info
-        
-        if coverage_info["coverage_ratio"] < 0.4:
-            coverage_info["status"] = "偏低"
-        elif coverage_info["coverage_ratio"] < 0.7:
-            coverage_info["status"] = "一般"
-        else:
-            coverage_info["status"] = "充足"
-        
-        material_texts = []
-        for i, (m, score) in enumerate(unique_materials, 1):
-            # 增加截断长度到400字，保留更多细节
-            content = truncate_text(m.content, 400)
-            material_texts.append(
-                f"[素材{i}] 来源: {m.source_file} (相关度: {score:.2f})\n"
-                f"内容: {content}\n"
-            )
-        
-        # 添加覆盖率提示
-        coverage_hint = f"""
-【素材覆盖率】{coverage_info['status']}（共{len(unique_materials)}条素材，高相关度{high_confidence}条）
-"""
-        
-        materials_text = "=== 相关素材（必须引用其中的具体细节）===\n" + "\n".join(material_texts) + coverage_hint
-        
-        return materials_text, coverage_info
-    
-    def _build_continuity_context(
-        self,
-        previous_summary: Optional[str],
-        global_state: Dict
-    ) -> str:
-        """构建上下文衔接信息"""
-        parts = ["=== 上下文衔接 ==="]
-        
-        # 上一节摘要
-        if previous_summary:
-            parts.append(f"上一节结尾:\n{truncate_text(previous_summary, 200)}")
-        
-        # 最近章节摘要
-        summaries = global_state.get("previous_summaries", [])
-        if summaries:
-            parts.append(f"前几章脉络:\n" + " → ".join(summaries[-3:]))
-        
-        # 频繁出现的人物
-        frequent_chars = global_state.get("frequent_characters", [])
-        if frequent_chars:
-            char_list = ", ".join([f"{name}({count}次)" for name, count in frequent_chars[:5]])
-            parts.append(f"活跃人物: {char_list}")
-        
-        return "\n".join(parts)
-    
-    def _analyze_sensory_details(self, materials_text: str) -> Dict[str, List[str]]:
-        """分析素材中的感官描述细节"""
-        sensory_found = {k: [] for k in self.SENSORY_KEYWORDS.keys()}
-
-        for material_line in materials_text.split('\n'):
-            if material_line.startswith('内容:'):
-                content = material_line[3:].strip()
-                for sense_type, keywords in self.SENSORY_KEYWORDS.items():
-                    for keyword in keywords:
-                        if keyword in content and keyword not in sensory_found[sense_type]:
-                            # 提取关键词周围的上下文
-                            idx = content.find(keyword)
-                            start = max(0, idx - 15)
-                            end = min(len(content), idx + 20)
-                            context = content[start:end]
-                            sensory_found[sense_type].append(context)
-                            break
-
-        return sensory_found
-
-    def _build_sensory_guidance(self, sensory_details: Dict[str, List[str]], style: WritingStyle) -> str:
-        """构建感官描写引导"""
-        # 读取风格配置
-        import yaml
-        from pathlib import Path
-
-        style_file = Path(__file__).parent.parent.parent / "config" / "styles.yaml"
-        try:
-            with open(style_file, "r", encoding="utf-8") as f:
-                styles_config = yaml.safe_load(f)
-            style_config = styles_config.get("styles", {}).get(style.value, {})
-            sensory_focus = style_config.get("sensory_focus", [])
-        except:
-            sensory_focus = []
-
-        parts = ["=== 感官描写指引 ==="]
-
-        # 从素材中提取的感官细节
-        found_any = False
-        for sense_type, contexts in sensory_details.items():
-            if contexts:
-                found_any = True
-                type_name = {
-                    "visual": "视觉", "auditory": "听觉", "olfactory": "嗅觉",
-                    "tactile": "触觉", "gustatory": "味觉"
-                }.get(sense_type, sense_type)
-                parts.append(f"【{type_name}细节素材】")
-                for ctx in contexts[:3]:  # 最多3个示例
-                    parts.append(f"  - ...{ctx}...")
-
-        if not found_any:
-            parts.append("【提示】当前素材中感官描述较少，建议结合时代背景补充具体感官细节。")
-
-        # 风格要求的感官重点
-        if sensory_focus:
-            parts.append(f"\n【本风格侧重的感官】{', '.join(sensory_focus)}")
-            parts.append("请在写作中优先考虑以上感官类型的描写。")
-
-        parts.append("\n【写作要求】")
-        parts.append("1. 每300字至少包含1-2处感官细节描写")
-        parts.append("2. 优先使用素材中已有的感官线索")
-        parts.append("3. 结合时代背景补充合理的感官信息（如当时的流行歌曲、食物味道等）")
-        parts.append("4. 避免套路化感官描写（如'茶香四溢'等），追求具体独特")
-
-        return "\n".join(parts)
-
-    def _build_era_context_enhanced(self, chapter: ChapterOutline) -> str:
-        if not chapter.time_period_start:
-            return """=== 时代背景 ===
-【提示】本章未明确指定时间段，请根据上下文推断或保持模糊处理。
-避免编造具体的历史事件年份。
-"""
-        
-        year = chapter.time_period_start[:4] if len(chapter.time_period_start) >= 4 else ""
-        
-        # 详细的年代背景
-        era_hints = {
-            "1949": ("新中国成立", "土地改革，抗美援朝，社会主义改造"),
-            "1950": ("建国初期", "百废待兴，三大改造，集体化运动"),
-            "1960": ("困难时期", "三年自然灾害，物质极度匮乏，票证制度"),
-            "1966": ("文革时期", "社会动荡，上山下乡，个人命运起伏"),
-            "1976": ("转折之年", "文革结束，拨乱反正，恢复高考"),
-            "1978": ("改革开放", "十一届三中全会，家庭联产承包，思想解放"),
-            "1980": ("改革初期", "特区设立，价格双轨制，万元户涌现"),
-            "1984": ("城市改革", "沿海开放城市，国企改革，商品经济"),
-            "1992": ("南巡讲话", "市场经济确立，下海热潮，开发浦东"),
-            "1997": ("香港回归", "国企改革攻坚，亚洲金融危机，互联网起步"),
-            "2001": ("入世元年", "WTO，申奥成功，房地产起步"),
-            "2008": ("金融危机", "奥运会，四万亿，房价飙升"),
-            "2010": ("移动互联网", "微博兴起，创业热潮，O2O"),
-        }
-        
-        era_desc = ""
-        era_keywords = ""
-        for decade, (era_name, keywords) in era_hints.items():
-            if year.startswith(decade[:3]):
-                era_desc = era_name
-                era_keywords = keywords
-                break
-        
-        if not era_desc:
-            era_desc = f"{year}年代"
-            era_keywords = "请参考历史资料"
-        
-        return f"""=== 时代背景（写作时必须融入）===
-时间: {year}年代
-时代特征: {era_desc}
-关键元素: {era_keywords}
-
-【写作要求】
-1. 必须结合当时的社会大环境描述传主的经历
-2. 可提及当时的物价水平、工资标准、流行文化等具体细节
-3. 将个人命运与时代变迁相结合
-4. 禁止使用"中国社会发展的重要时期"等空泛表述
-"""
+# 注意：ContextAssembler 类已被 ProgressiveContextAssembler 替代
+# 旧实现保留在 src/context_assembler.py 中用于向后兼容
+# 新的渐进式上下文加载请使用 ProgressiveContextAssembler
 
 
 class ContentGenerationEngine:
-    """内容扩写引擎"""
-    
-    def __init__(self, llm: LLMClient):
+    """内容扩写引擎 - 使用提示词模板系统"""
+
+    def __init__(self, llm: LLMClient, prompt_manager: Optional[PromptManager] = None):
         self.llm = llm
         self.max_retries = 3
+        # 初始化提示词管理器
+        self.prompt_manager = prompt_manager or get_prompt_manager()
     
     async def generate_section(
         self,
@@ -446,34 +147,49 @@ class ContentGenerationEngine:
     async def generate_section_stream(
         self,
         context: Dict[str, str],
-        style: WritingStyle
+        style: WritingStyle,
+        context_level: ContextLevel = ContextLevel.L1_ESSENTIAL
     ) -> AsyncIterator[str]:
         """流式生成内容"""
-        system_prompt = self._build_system_prompt(style)
+        system_prompt = self._build_system_prompt(style, context_level)
         user_prompt = self._build_generation_prompt(context, 0)
-        
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        
+
         async for chunk in self.llm.complete_stream(messages, temperature=0.7):
             yield chunk
     
-    def _build_system_prompt(self, style: WritingStyle) -> str:
-        """构建系统提示词"""
-        import yaml
-        from pathlib import Path
-        
-        style_file = Path(__file__).parent.parent.parent / "config" / "styles.yaml"
-        with open(style_file, "r", encoding="utf-8") as f:
-            styles_config = yaml.safe_load(f)
-        
-        style_config = styles_config.get("styles", {}).get(style.value, {})
-        base_prompt = style_config.get("system_prompt", "")
-        
-        # 添加通用要求和强制约束，包含Few-shot示例
-        full_prompt = f"""{base_prompt}
+    def _build_system_prompt(self, style: WritingStyle, context_level: ContextLevel = ContextLevel.L1_ESSENTIAL) -> str:
+        """构建系统提示词 - 使用模板系统"""
+        try:
+            # 使用提示词管理器渲染风格化系统提示词
+            from src.prompt_manager import WritingStyle as PMWritingStyle
+
+            pm_style = PMWritingStyle(style.value)
+            return self.prompt_manager.render_style_prompt(
+                style=pm_style,
+                context={"context_level": context_level.value}
+            )
+        except Exception as e:
+            logger.warning(f"模板渲染失败，使用回退方案: {e}")
+            # 回退到基础提示词
+            return self._build_fallback_system_prompt(style)
+
+    def _build_fallback_system_prompt(self, style: WritingStyle) -> str:
+        """构建回退系统提示词（当模板系统不可用时）"""
+        style_descriptions = {
+            "documentary": "纪实风格：客观、真实、详尽的记录风格",
+            "literary": "文学风格：注重文学性和艺术性",
+            "investigative": "调查风格：类似深度报道，注重挖掘和揭示",
+            "memoir": "回忆录风格：第一人称回忆式叙述"
+        }
+
+        style_desc = style_descriptions.get(style.value, "纪实风格")
+
+        return f"""你是一位专业的传记作家。{style_desc}
 
 === 角色锚定 ===
 你是一位对事实极度苛求的非虚构传记作家。你的每一句描写都必须能指向采访素材中的具体来源。
@@ -496,50 +212,6 @@ class ContentGenerationEngine:
 7. 【时间套路】"时光荏苒"、"转眼间"、"岁月如梭"、"白驹过隙"等
 8. 【场景套路】"月光如水"、"微风轻拂"、"阳光正好"、"点了一根烟"、"望着远方"等
 
-=== 正反面示例（必须遵循） ===
-
-【反面示例 ❌ 必须避免】
-
-❌ 例1 - 套路化意象：
-"晨光透过窗户洒进来，尘埃在光柱中飞舞。陈国伟端起茶杯，凉茶早已凉透，苦涩中带着回甘。"
-→ 问题："尘埃光柱"、"凉茶苦甘"是AI常见套路，无具体来源
-
-❌ 例2 - 情感标签：
-"得知这个消息，陈国伟陷入了沉思，心中充满了复杂的情绪。"
-→ 问题："陷入沉思"、"充满情绪"是空洞标签，没有具体言行支撑
-
-❌ 例3 - 空泛表述：
-"那是一个风云变幻、波澜壮阔的特殊年代，对陈国伟的人生产生了深刻影响。"
-→ 问题：没有具体时间地点，全是空泛形容词
-
-❌ 例4 - 占位符：
-"（此处需要补充更多细节，待后续完善）"
-→ 问题：明显的AI占位符，必须删除
-
-【正面示例 ✅ 应该模仿】
-
-✅ 例1 - 基于具体素材：
-"1982年春天，陈国伟背着布包走进藤编厂（来源：素材3）。厂门口有棵老榕树，车间里是成捆的藤条和化学药剂的味道。门卫老头翻着登记簿说：'你就是那个手很巧的小子。'"
-→ 优点：具体时间、地点、对话、气味细节，都有来源支撑
-
-✅ 例2 - 有言行支撑的心理：
-"陈国伟站在厂门口，深吸一口气——那是藤条被水泡发后的清香，混合着汗味和机油味（来源：素材3）。他没有立即进去，而是在榕树下站了几分钟，把布包的带子攥紧了又松开。"
-→ 优点：通过动作（吸气、攥带子）表现紧张，而非直接说"他很紧张"
-
-✅ 例3 - 时代背景具体化：
-"1984年，陈国伟第一次离开佛山去广州。那时候广州火车站很乱，他在流花湖那边倒腾服装，从石狮进货。没有营业执照，看到戴红袖箍的来抓，卷起包袱就跑（来源：素材2）。"
-→ 优点：具体年份、地点、行为细节，而非"改革开放初期"的空泛描述
-
-=== 输出前自检清单 ===
-生成内容后，请逐条检查，全部通过后再输出：
-□ 没有出现"待补充"、"此处需要展开"等占位符
-□ 没有出现"尘埃光柱"、"凉茶苦甘"、"命运齿轮"等套路化意象
-□ 没有出现"陷入沉思"、"百感交集"等无支撑的情感标签
-□ 每个场景描写都能在素材中找到对应或依据
-□ 包含至少1个具体时间（年份）和1个具体地点
-□ 包含至少1个具体数字（金额、数量、年龄等）或1段人物对话
-□ 章节结尾自然收束，没有"更大的挑战在等待"等虚假悬念
-
 === 写作要求 ===
 1. 基于提供的素材进行扩写，不要脱离素材随意发挥
 2. 注重细节描写：场景、动作、对话、心理活动
@@ -549,7 +221,6 @@ class ContentGenerationEngine:
 6. 使用中文写作，语言流畅自然
 7. 章节结尾应自然收束，不要强行制造悬念
 """
-        return full_prompt
     
     def _build_generation_prompt(self, context: Dict[str, str], target_words: int) -> str:
         """构建生成提示词"""
@@ -740,41 +411,136 @@ class ContentGenerationEngine:
 
 
 class IterativeGenerationLayer:
-    """迭代生成层主类"""
-    
-    def __init__(self, llm: LLMClient, vector_store: VectorStore):
+    """迭代生成层主类 - 双Agent架构
+
+    架构流程:
+    1. Context Agent (创作任务书工程师) - 生成前
+       - 输入: 大纲、素材、前文、人物状态
+       - 输出: ContextContract (7板块创作任务书)
+
+    2. Generation Engine (内容扩写引擎) - 生成中
+       - 输入: ContextContract 转换的提示词上下文
+       - 输出: GeneratedChapter
+
+    3. Data Agent (数据链工程师) - 生成后
+       - 输入: GeneratedChapter
+       - 输出: ExtractionResult (实体、状态、向量嵌入)
+    """
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        vector_store: VectorStore,
+        token_budget: Optional[TokenBudget] = None,
+        default_context_level: ContextLevel = ContextLevel.L1_ESSENTIAL,
+        use_dual_agent: bool = True  # 是否启用双Agent架构
+    ):
         self.llm = llm
-        self.context_assembler = ContextAssembler(llm, vector_store)
-        self.generation_engine = ContentGenerationEngine(llm)
+        self.vector_store = vector_store
+        self.default_context_level = default_context_level
+        self.use_dual_agent = use_dual_agent
+
+        # 渐进式上下文组装器（向后兼容）
+        self.context_assembler = ProgressiveContextAssembler(
+            llm=llm,
+            vector_store=vector_store,
+            budget=token_budget or TokenBudget()
+        )
+
+        # 双Agent架构组件
+        if use_dual_agent:
+            self.context_agent = ContextAgent(llm, vector_store)
+            self.data_agent = DataAgent(llm, vector_store)
+            logger.info("双Agent架构已启用: ContextAgent + DataAgent")
+        else:
+            self.context_agent = None
+            self.data_agent = None
+
+        # 初始化提示词管理器
+        self.prompt_manager = get_prompt_manager()
+
+        self.generation_engine = ContentGenerationEngine(llm, self.prompt_manager)
+
+        # 章节元数据缓存（用于Data Agent）
+        self._chapter_meta_cache: Dict[int, Dict] = {}
     
     async def generate_chapter(
         self,
         chapter_outline: ChapterOutline,
         book_outline: BookOutline,
         global_state: Dict,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        context_level: Optional[ContextLevel] = None
     ) -> GeneratedChapter:
         """
-        生成完整章节
+        生成完整章节 - 双Agent架构版本
+
+        Args:
+            chapter_outline: 章节大纲
+            book_outline: 书籍大纲
+            global_state: 全局状态
+            progress_callback: 进度回调函数
+            context_level: 上下文加载级别，默认使用L1_ESSENTIAL
+
+        Returns:
+            GeneratedChapter: 生成的章节
         """
-        logger.info(f"开始生成第{chapter_outline.order}章: {chapter_outline.title}")
-        
+        level = context_level or self.default_context_level
+        logger.info(f"开始生成第{chapter_outline.order}章: {chapter_outline.title} [上下文级别: {level.value}]")
+
         sections = []
         previous_summary = None
-        
+
+        # 获取上一章的元数据（用于Context Agent）
+        previous_chapter_meta = self._get_previous_chapter_meta(chapter_outline.order)
+
         for i, section_outline in enumerate(chapter_outline.sections):
             # 更新进度
             if progress_callback:
                 progress_callback(f"第{chapter_outline.order}章 - {section_outline.title}")
-            
-            # 组装上下文
-            context = await self.context_assembler.assemble_context(
-                section=section_outline,
-                chapter=chapter_outline,
-                outline=book_outline,
-                global_state=global_state,
-                previous_section_summary=previous_summary
+
+            # 根据场景动态调整上下文级别
+            effective_level = self._determine_section_context_level(
+                level, chapter_outline.order, i, len(chapter_outline.sections)
             )
+
+            # ========== Step 1: Context Agent 组装创作任务书 ==========
+            if self.use_dual_agent and isinstance(global_state, EnhancedGlobalState):
+                logger.info(f"  ContextAgent: 组装创作任务书...")
+                context_contract = await self.context_agent.assemble_contract(
+                    section=section_outline,
+                    chapter=chapter_outline,
+                    outline=book_outline,
+                    global_state=global_state,
+                    previous_section_summary=previous_summary,
+                    previous_chapter_meta=previous_chapter_meta
+                )
+
+                # 检索素材并更新合同
+                materials_text, coverage_info = await self.context_agent.retrieve_materials(
+                    section=section_outline,
+                    chapter=chapter_outline
+                )
+
+                # 将素材嵌入到合同中
+                context_contract.materials = materials_text  # 动态添加属性
+                context_contract.coverage_info = coverage_info
+
+                # 转换为生成器需要的格式
+                context = context_contract.to_prompt_context()
+                logger.info(f"  ContextAgent: 创作任务书完成 [素材覆盖率: {coverage_info.get('status', '未知')}]")
+            else:
+                # 向后兼容：使用渐进式上下文组装器
+                loaded_context = await self.context_assembler.assemble_context(
+                    section=section_outline,
+                    chapter=chapter_outline,
+                    outline=book_outline,
+                    global_state=global_state,
+                    level=effective_level,
+                    previous_section_summary=previous_summary,
+                    generated_sections=sections
+                )
+                context = self.context_assembler.to_prompt_context(loaded_context)
 
             # 提取小节标题和段落级大纲
             context["section_title"] = section_outline.title
@@ -798,30 +564,122 @@ class IterativeGenerationLayer:
                 context["inference_basis"] = section_outline.inference_basis
                 logger.info(f"  生成推断内容: {section_outline.title}")
 
-            # 生成内容
+            # ========== Step 2: Generation Engine 生成内容 ==========
             section = await self.generation_engine.generate_section(
                 context=context,
                 style=book_outline.style,
                 target_words=section_outline.target_words
             )
             section.chapter_id = chapter_outline.id
-            
+
             sections.append(section)
-            
+
             # 更新摘要供下一节使用
             previous_summary = truncate_text(section.content, 200)
-            
+
             logger.info(f"  完成小节 {i+1}/{len(chapter_outline.sections)}: {section.word_count}字")
-        
+
         # 生成过渡段落（简化版，不再强行制造悬念）
         transition = await self._generate_transition_simple(chapter_outline, book_outline)
-        
-        return GeneratedChapter(
+
+        generated_chapter = GeneratedChapter(
             id=generate_id("chapter_gen", chapter_outline.order),
             outline=chapter_outline,
             sections=sections,
             transition_paragraph=transition
         )
+
+        # ========== Step 3: Data Agent 处理数据链 ==========
+        if self.use_dual_agent and isinstance(global_state, EnhancedGlobalState):
+            logger.info(f"DataAgent: 开始处理章节数据...")
+
+            extraction_result = await self.data_agent.process_chapter(
+                generated_chapter=generated_chapter,
+                outline=book_outline,
+                global_state=global_state
+            )
+
+            # 更新全局状态
+            global_state = await self.data_agent.update_global_state(
+                result=extraction_result,
+                global_state=global_state,
+                generated_chapter=generated_chapter
+            )
+
+            # 生成向量嵌入
+            await self.data_agent.generate_embeddings(
+                result=extraction_result,
+                generated_chapter=generated_chapter,
+                project_root=global_state.book_id  # 假设book_id包含项目路径
+            )
+
+            # 缓存章节元数据供下一章使用
+            if extraction_result.chapter_meta:
+                self._chapter_meta_cache[chapter_outline.order] = {
+                    "hook": {
+                        "type": extraction_result.chapter_meta.hook_type,
+                        "content": extraction_result.chapter_meta.hook_content,
+                        "strength": extraction_result.chapter_meta.hook_strength
+                    },
+                    "ending": {
+                        "time": extraction_result.chapter_meta.ending_time,
+                        "location": extraction_result.chapter_meta.ending_location,
+                        "emotion": extraction_result.chapter_meta.ending_emotion
+                    },
+                    "pattern": {
+                        "opening": extraction_result.chapter_meta.pattern_opening,
+                        "hook": extraction_result.chapter_meta.pattern_hook,
+                        "emotion_rhythm": extraction_result.chapter_meta.emotion_rhythm,
+                        "info_density": extraction_result.chapter_meta.info_density
+                    }
+                }
+
+            logger.info(f"DataAgent: 章节数据处理完成 - "
+                       f"实体{len(extraction_result.entities_appeared)}个, "
+                       f"场景{len(extraction_result.scenes_chunked)}个")
+
+        return generated_chapter
+
+    def _get_previous_chapter_meta(self, current_chapter_order: int) -> Optional[Dict]:
+        """获取上一章的元数据
+
+        Args:
+            current_chapter_order: 当前章节序号
+
+        Returns:
+            上一章的元数据，如果是第一章则返回None
+        """
+        if current_chapter_order <= 1:
+            return None
+        return self._chapter_meta_cache.get(current_chapter_order - 1)
+
+    def _determine_section_context_level(
+        self,
+        base_level: ContextLevel,
+        chapter_order: int,
+        section_index: int,
+        total_sections: int
+    ) -> ContextLevel:
+        """根据小节位置动态确定上下文级别
+
+        策略：
+        - 章节开头的小节可能需要更多上下文
+        - 章节结尾的小节可能需要检查连贯性
+        """
+        # 如果是第一章第一节，提升一级以获取更多背景
+        if chapter_order == 1 and section_index == 0:
+            if base_level == ContextLevel.L0_MINIMAL:
+                return ContextLevel.L1_ESSENTIAL
+            elif base_level == ContextLevel.L1_ESSENTIAL:
+                return ContextLevel.L2_EXTENDED
+
+        # 如果是章节最后一个小节，可能需要检查连贯性
+        if section_index == total_sections - 1 and base_level.value < ContextLevel.L2_EXTENDED.value:
+            # 仅在L0/L1时提升到L2
+            if base_level == ContextLevel.L0_MINIMAL:
+                return ContextLevel.L1_ESSENTIAL
+
+        return base_level
     
     async def _generate_transition_simple(
         self,
@@ -845,3 +703,109 @@ class IterativeGenerationLayer:
         
         # 简化过渡，仅做内容预告，不制造虚假悬念
         return f"（本章完，下一章《{next_chapter.title}》将继续讲述{outline.subject_name or '传主'}的故事）"
+
+
+# =============================================================================
+# 便捷工厂函数
+# =============================================================================
+
+def create_generation_layer(
+    llm: LLMClient,
+    vector_store: VectorStore,
+    context_level: ContextLevel = ContextLevel.L1_ESSENTIAL,
+    token_budget: Optional[TokenBudget] = None,
+    use_dual_agent: bool = True
+) -> IterativeGenerationLayer:
+    """创建配置好的生成层实例
+
+    Args:
+        llm: LLM客户端
+        vector_store: 向量存储
+        context_level: 默认上下文加载级别
+        token_budget: Token预算配置
+        use_dual_agent: 是否启用双Agent架构，默认为True
+
+    Returns:
+        IterativeGenerationLayer: 配置好的生成层实例
+
+    Example:
+        >>> from src.layers.generation import create_generation_layer, ContextLevel
+        >>> layer = create_generation_layer(
+        ...     llm=llm_client,
+        ...     vector_store=vector_store,
+        ...     context_level=ContextLevel.L2_EXTENDED,
+        ...     use_dual_agent=True  # 启用双Agent架构
+        ... )
+    """
+    return IterativeGenerationLayer(
+        llm=llm,
+        vector_store=vector_store,
+        token_budget=token_budget,
+        default_context_level=context_level,
+        use_dual_agent=use_dual_agent
+    )
+
+
+async def generate_with_context_level(
+    layer: IterativeGenerationLayer,
+    chapter_outline: ChapterOutline,
+    book_outline: BookOutline,
+    global_state: Dict,
+    context_level: ContextLevel,
+    progress_callback: Optional[callable] = None
+) -> GeneratedChapter:
+    """使用指定上下文级别生成章节
+
+    这是一个便捷的包装函数，用于临时切换上下文级别进行生成。
+
+    Args:
+        layer: 生成层实例
+        chapter_outline: 章节大纲
+        book_outline: 书籍大纲
+        global_state: 全局状态
+        context_level: 指定的上下文级别
+        progress_callback: 进度回调
+
+    Returns:
+        GeneratedChapter: 生成的章节
+
+    Example:
+        >>> from src.layers.generation import generate_with_context_level, ContextLevel
+        >>> chapter = await generate_with_context_level(
+        ...     layer=generation_layer,
+        ...     chapter_outline=chapter_outline,
+        ...     book_outline=book_outline,
+        ...     global_state=global_state,
+        ...     context_level=ContextLevel.L3_COMPLETE  # 使用完整上下文审校
+        ... )
+    """
+    return await layer.generate_chapter(
+        chapter_outline=chapter_outline,
+        book_outline=book_outline,
+        global_state=global_state,
+        progress_callback=progress_callback,
+        context_level=context_level
+    )
+
+
+# 导出主要类供外部使用
+__all__ = [
+    # 核心类
+    'IterativeGenerationLayer',
+    'ContentGenerationEngine',
+    'ProgressiveContextAssembler',
+    # 双Agent架构
+    'ContextAgent',
+    'ContextContract',
+    'DataAgent',
+    'ExtractionResult',
+    # 配置类
+    'ContextLevel',
+    'TokenBudget',
+    'ContextPriority',
+    'LoadedContext',
+    'ContextLevelSelector',
+    # 便捷函数
+    'create_generation_layer',
+    'generate_with_context_level',
+]

@@ -1,0 +1,171 @@
+{# 信息提取系统提示词模板 #}
+{# 变量: extraction_type, content #}
+
+{% if extraction_type == 'entities' %}
+=== 实体提取任务 ===
+
+请从以下传记内容中提取所有关键实体。
+
+【提取类型】
+1. 人物：姓名、别名、与传主关系、身份
+2. 地点：具体地址、场所、地理区域
+3. 组织：公司、机构、团体
+4. 时间：具体日期、年份、时间段
+5. 物品：重要物品、工具、纪念品
+6. 事件：重要事件、转折点
+
+【输出格式】
+请按以下JSON格式输出：
+{
+  "entities": [
+    {
+      "type": "person/location/organization/time/item/event",
+      "name": "实体名称",
+      "aliases": ["别名1", "别名2"],
+      "attributes": {
+        "key": "value"
+      },
+      "first_appearance": "首次出现位置",
+      "mentions": ["提及位置1", "提及位置2"]
+    }
+  ]
+}
+
+{% elif extraction_type == 'timeline' %}
+=== 时间线提取任务 ===
+
+请从以下传记内容中提取完整的时间线信息。
+
+【提取要素】
+1. 时间点：确切日期或年份
+2. 事件：该时间点发生的事件
+3. 地点：事件发生地点
+4. 人物：涉及的人物
+5. 重要性：事件对传主的影响程度(1-10)
+
+【输出格式】
+请按以下JSON格式输出：
+{
+  "timeline_events": [
+    {
+      "date": "日期或年份",
+      "time_precision": "exact/year/month/season/period",
+      "title": "事件标题",
+      "description": "事件描述",
+      "location": "地点",
+      "characters": ["人物1", "人物2"],
+      "importance": 1-10,
+      "event_type": "life_event/achievement/crisis/transition"
+    }
+  ]
+}
+
+{% elif extraction_type == 'character_state' %}
+=== 人物状态提取任务 ===
+
+请从本章内容中提取传主的状态变化。
+
+【提取维度】
+1. 物理状态：健康状况、外貌变化、位置
+2. 心理状态：情绪变化、心理转折、认知变化
+3. 社会状态：人际关系、社会地位、经济状况
+4. 能力状态：技能变化、知识增长、能力提升
+
+【输出格式】
+请按以下JSON格式输出：
+{
+  "state_changes": [
+    {
+      "dimension": "physical/psychological/social/capability",
+      "aspect": "具体方面",
+      "before": "变化前状态",
+      "after": "变化后状态",
+      "trigger": "触发事件",
+      "location": "发生位置"
+    }
+  ],
+  "current_state": {
+    "physical": "当前物理状态",
+    "psychological": "当前心理状态",
+    "social": "当前社会状态",
+    "capability": "当前能力状态"
+  }
+}
+
+{% elif extraction_type == 'scenes' %}
+=== 场景提取任务 ===
+
+请从本章内容中提取所有场景信息。
+
+【提取要素】
+1. 场景位置：地点、环境描述
+2. 时间设定：时间、天气、光线
+3. 出场人物：在场人物及其状态
+4. 场景事件：场景中发生的主要事件
+5. 感官细节：视觉、听觉、嗅觉、触觉、味觉描写
+
+【输出格式】
+请按以下JSON格式输出：
+{
+  "scenes": [
+    {
+      "scene_id": "场景编号",
+      "location": "地点",
+      "time": "时间设定",
+      "atmosphere": "氛围",
+      "characters_present": ["人物1", "人物2"],
+      "key_events": ["事件1", "事件2"],
+      "sensory_details": {
+        "visual": "视觉描写",
+        "auditory": "听觉描写",
+        "olfactory": "嗅觉描写",
+        "tactile": "触觉描写",
+        "gustatory": "味觉描写"
+      },
+      "emotional_tone": "情感基调",
+      "narrative_function": "叙事功能"
+    }
+  ]
+}
+
+{% else %}
+=== 综合信息提取任务 ===
+
+请从本章内容中提取所有关键信息。
+
+【提取类型】
+1. 实体信息（人物、地点、组织、物品）
+2. 时间线事件
+3. 人物状态变化
+4. 场景信息
+5. 关键对话
+6. 重要数据（数字、金额等）
+
+【输出格式】
+请按以下JSON格式输出：
+{
+  "extraction_summary": {
+    "entity_count": 实体数量,
+    "event_count": 事件数量,
+    "scene_count": 场景数量
+  },
+  "entities": [...],
+  "timeline_events": [...],
+  "state_changes": [...],
+  "scenes": [...],
+  "key_quotes": [
+    {
+      "speaker": "说话人",
+      "content": "对话内容",
+      "context": "上下文"
+    }
+  ],
+  "key_data": [
+    {
+      "type": "数字类型",
+      "value": "数值",
+      "context": "上下文"
+    }
+  ]
+}
+{% endif %}

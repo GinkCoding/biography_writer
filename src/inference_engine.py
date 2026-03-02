@@ -367,7 +367,7 @@ class CharacterInferenceEngine:
         death_year = None
 
         for event in events:
-            event_time = event.time if hasattr(event, 'time') else event.get('time', '')
+            event_time = event.date if hasattr(event, 'date') else event.get('date', '')
             if '出生' in str(event):
                 try:
                     birth_year = int(event_time[:4])
@@ -425,7 +425,7 @@ class CharacterInferenceEngine:
     def _extract_year(self, event) -> int:
         """从事件中提取年份"""
         try:
-            time_str = event.time if hasattr(event, 'time') else event.get('time', '0')
+            time_str = event.date if hasattr(event, 'date') else event.get('date', '0')
             return int(time_str[:4])
         except:
             return 0

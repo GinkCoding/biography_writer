@@ -1,4 +1,5 @@
 """第三层：规划与编排层 (Planning & Orchestration)"""
+import re
 import yaml
 from typing import List, Dict, Optional
 from pathlib import Path
@@ -7,7 +8,7 @@ from loguru import logger
 from src.llm_client import LLMClient
 from src.models import (
     WritingStyle, BookOutline, ChapterOutline, SectionOutline,
-    Timeline, CharacterProfile
+    Timeline, CharacterProfile, Event
 )
 from src.config import settings
 from src.utils import generate_id, count_chinese_words

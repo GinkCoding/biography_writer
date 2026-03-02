@@ -25,7 +25,7 @@ class EmbeddingProvider:
 class SentenceTransformerEmbedding(EmbeddingProvider):
     """基于SentenceTransformer的Embedding（首选）"""
     
-    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
+    def __init__(self, model_name: str = "BAAI/bge-m3"):
         self.model_name = model_name
         self.model = None
         self._load_model()
@@ -88,13 +88,13 @@ class SiliconFlowEmbedding(EmbeddingProvider):
     
     # 推荐的Embedding模型
     RECOMMENDED_MODELS = [
-        "BAAI/bge-large-zh-v1.5",           # 百度开源，中文效果优秀
+        "BAAI/bge-m3",          # 通义千问 8B 参数，中文效果优秀
         "BAAI/bge-m3",                       # 多语言，支持8192长度
         "netease-youdao/bce-embedding-base_v1",  # 有道开源
         "Pro/BAAI/bge-m3",                   # 专业版
     ]
     
-    def __init__(self, api_key: Optional[str] = None, model: str = "BAAI/bge-large-zh-v1.5"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "BAAI/bge-m3"):
         self.api_key = api_key
         self.model = model
         self.client = None
@@ -158,9 +158,9 @@ class SiliconFlowEmbedding(EmbeddingProvider):
         """清理文本"""
         # 去除多余空白
         text = " ".join(text.split())
-        # 截断超长文本（硅基流动通常支持较长的上下文）
-        if len(text) > 8000:
-            text = text[:8000]
+        # 截断到 400 字符（约 512 tokens 安全范围）
+        if len(text) > 400:
+            text = text[:400]
         return text
     
     @classmethod
@@ -306,6 +306,7 @@ class EmbeddingManager:
             try:
                 if provider_type == 'siliconflow':
                     self._init_siliconflow()
+                    logger.info(f"Embedding 模型：{self.provider.model if self.provider else 'N/A'}")
                     return
                 elif provider_type == 'sentence_transformer':
                     self._init_sentence_transformer()
@@ -324,17 +325,17 @@ class EmbeddingManager:
     
     def _init_siliconflow(self):
         """初始化硅基流动"""
-        api_key = self.config.get('siliconflow_api_key')
-        model = self.config.get('siliconflow_model', 'BAAI/bge-large-zh-v1.5')
+        import os, dotenv
+        from pathlib import Path
+        env_file = Path(__file__).parent.parent / '.env'
+        if env_file.exists():
+            dotenv.load_dotenv(env_file)
+            logger.info(f'已加载.env 文件：{env_file}')
+        api_key = self.config.get('siliconflow_api_key') or os.getenv('SILICONFLOW_API_KEY')
+        model = 'BAAI/bge-m3'  # 强制使用
+        logger.info(f"DEBUG: config_keys={list(self.config.keys())}, config.model={self.config.get('model', 'N/A')}, config.siliconflow_model={self.config.get('siliconflow_model', 'N/A')}, env={os.getenv('SILICONFLOW_MODEL', 'N/A')}, final={model}")
         self.provider = SiliconFlowEmbedding(api_key, model)
-        logger.info(f"✅ 使用硅基流动Embedding: {model}")
-    
-    def _init_sentence_transformer(self):
-        """初始化SentenceTransformer"""
-        model_name = self.config.get('model', 'BAAI/bge-small-zh-v1.5')
-        self.provider = SentenceTransformerEmbedding(model_name)
-        logger.info(f"✅ 使用SentenceTransformer模型: {model_name}")
-    
+        logger.info(f"✅ 使用硅基流动 Embedding: {model}")
     def _init_openai(self):
         """初始化OpenAI"""
         api_key = self.config.get('openai_api_key')

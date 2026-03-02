@@ -1,12 +1,17 @@
 """大模型客户端封装 - 支持多提供商和自动配置"""
 import os
 import asyncio
+from datetime import datetime
 from typing import AsyncIterator, List, Dict, Any, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 from loguru import logger
 
 from src.config import settings
 from src.models import WritingStyle
+
+# 导入可观测性模块
+from src.observability import MetricsCollector
+from src.observability.workflow_tracer import WorkflowTracer, LayerType, TraceStatus
 
 
 class LLMClient:
@@ -36,6 +41,10 @@ class LLMClient:
 
         self.max_tokens = settings.model.max_tokens
         self.temperature = settings.model.temperature
+
+        # 初始化可观测性组件
+        self.metrics = MetricsCollector()
+        self.tracer = WorkflowTracer()
 
         # 初始化对应提供商的客户端
         self._init_client()
@@ -118,14 +127,85 @@ class LLMClient:
         temp = temperature or self.temperature
         max_tok = max_tokens or self.max_tokens
 
+        # 开始追踪
+        trace_id = self.tracer.start_trace(
+            LayerType.LLM_CLIENT,
+            "complete",
+            {
+                "provider": self.provider,
+                "model": self.model,
+                "message_count": len(messages),
+                "temperature": temp,
+                "max_tokens": max_tok
+            }
+        )
+
+        start_time = datetime.now()
+        error = False
+        retry_count = 0
+
         try:
             if self.provider in ['kimi', 'openai']:
-                return await self._call_openai_compatible(messages, temp, max_tok)
+                result = await self._call_openai_compatible(messages, temp, max_tok)
             elif self.provider == 'zhipuai':
-                return await self._call_zhipuai(messages, temp, max_tok)
+                result = await self._call_zhipuai(messages, temp, max_tok)
             else:
                 raise ValueError(f"不支持的提供商: {self.provider}")
+
+            # 计算延迟
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+            # 估算token数量 (简化估算: 中文字符数 + 英文单词数)
+            prompt_text = "\n".join([m.get("content", "") for m in messages])
+            prompt_tokens = len(prompt_text) // 4  # 粗略估算
+            completion_tokens = len(result) // 4
+            total_tokens = prompt_tokens + completion_tokens
+
+            # 记录指标
+            self.metrics.record_api_call(
+                provider=self.provider,
+                model=self.model,
+                tokens=total_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=duration_ms,
+                error=False,
+                retry=retry_count > 0
+            )
+
+            # 结束追踪
+            self.tracer.end_trace(
+                trace_id,
+                TraceStatus.COMPLETED,
+                {
+                    "duration_ms": duration_ms,
+                    "tokens": total_tokens,
+                    "result_length": len(result)
+                }
+            )
+
+            return result
+
         except Exception as e:
+            error = True
+            duration_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+            # 记录失败指标
+            self.metrics.record_api_call(
+                provider=self.provider,
+                model=self.model,
+                latency_ms=duration_ms,
+                error=True,
+                retry=retry_count > 0
+            )
+
+            # 结束追踪
+            self.tracer.end_trace(
+                trace_id,
+                TraceStatus.FAILED,
+                error=str(e)
+            )
+
             logger.error(f"LLM调用失败: {e}")
             raise
 

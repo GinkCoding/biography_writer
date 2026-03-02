@@ -13,8 +13,9 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from loguru import logger
 
-from src.models import BiographyBook, GeneratedChapter, GeneratedSection, BookOutline
+from src.models import BiographyBook, GeneratedChapter, GeneratedSection, BookOutline, ChapterOutline
 from src.utils import count_chinese_words, sanitize_filename
+from src.version_control import GitManager
 
 
 @dataclass
@@ -138,10 +139,11 @@ class ChapterVersionSelector:
 class BookFinalizer:
     """书籍终版生成器"""
 
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, git_manager: Optional[GitManager] = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.version_selector = ChapterVersionSelector()
+        self.git_manager = git_manager
 
     def add_chapter_version(
         self,
@@ -232,6 +234,13 @@ class BookFinalizer:
 
         # 保存版本选择报告
         self._save_version_report(book_id)
+
+        # 提交终版
+        if self.git_manager:
+            self.git_manager.create_tag(
+                f"final-{book_id}",
+                f"Final version: {final_book.outline.title} ({final_book.total_word_count} words)"
+            )
 
         return final_book
 
@@ -476,7 +485,8 @@ def finalize_and_export(
     outline: BookOutline,
     book_id: str,
     output_dir: Path,
-    cover_image: Optional[Path] = None
+    cover_image: Optional[Path] = None,
+    git_manager: Optional[GitManager] = None
 ) -> Dict[str, Path]:
     """
     一站式终版生成和导出
@@ -487,11 +497,12 @@ def finalize_and_export(
         book_id: 书籍ID
         output_dir: 输出目录
         cover_image: 封面图片路径（可选）
+        git_manager: Git管理器（可选）
 
     Returns:
         导出的文件路径字典
     """
-    finalizer = BookFinalizer(output_dir)
+    finalizer = BookFinalizer(output_dir, git_manager=git_manager)
 
     # 添加所有章节版本
     for chapter in chapters:

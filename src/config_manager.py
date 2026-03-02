@@ -11,7 +11,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from typing import Dict, Optional, Any, List, Callable
+from typing import Dict, Optional, Any, List, Callable, Tuple
 from dataclasses import dataclass
 from functools import wraps
 
@@ -128,6 +128,14 @@ class ConfigManager:
                     default='',
                     env_vars=['OPENAI_BASE_URL']
                 ),
+                ConfigRequirement(
+                    key='model',
+                    name='Model',
+                    description='模型名称',
+                    prompt='模型名称',
+                    default='gpt-4-turbo-preview',
+                    env_vars=['OPENAI_MODEL']
+                ),
             ],
             'zhipuai': [
                 ConfigRequirement(
@@ -155,7 +163,7 @@ class ConfigManager:
                     name='模型',
                     description='Embedding模型',
                     prompt='Embedding模型',
-                    default='BAAI/bge-large-zh-v1.5',
+                    default='BAAI/bge-m3',
                     env_vars=['SILICONFLOW_MODEL']
                 ),
             ],
@@ -165,7 +173,7 @@ class ConfigManager:
                     name='模型',
                     description='本地模型名称',
                     prompt='模型名称',
-                    default='BAAI/bge-small-zh-v1.5',
+                    default='BAAI/bge-m3',
                     env_vars=['SENTENCE_TRANSFORMER_MODEL']
                 ),
             ],
