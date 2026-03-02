@@ -59,7 +59,7 @@ class SentenceTransformerEmbedding(EmbeddingProvider):
             batch_size=32,
             show_progress_bar=False
         )
-        return embeddings
+        return np.asarray(embeddings, dtype=np.float32)
     
     def encode_query(self, text: str) -> np.ndarray:
         """编码查询（添加指令前缀以获得更好效果）"""
@@ -137,12 +137,12 @@ class SiliconFlowEmbedding(EmbeddingProvider):
             )
             
             embeddings = np.array([item.embedding for item in response.data])
-            
+
             # 归一化
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             embeddings = embeddings / norms
-            
-            return embeddings
+
+            return np.asarray(embeddings, dtype=np.float32)
             
         except Exception as e:
             logger.error(f"调用硅基流动API失败: {e}")
@@ -206,7 +206,7 @@ class OpenAIEmbedding(EmbeddingProvider):
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         embeddings = embeddings / norms
         
-        return embeddings
+        return np.asarray(embeddings, dtype=np.float32)
 
 
 class TFIDFEmbedding(EmbeddingProvider):
@@ -260,7 +260,7 @@ class TFIDFEmbedding(EmbeddingProvider):
         norms[norms == 0] = 1  # 避免除零
         embeddings = embeddings / norms
         
-        return embeddings
+        return np.asarray(embeddings, dtype=np.float32)
 
 
 class EmbeddingManager:
@@ -336,6 +336,13 @@ class EmbeddingManager:
         logger.info(f"DEBUG: config_keys={list(self.config.keys())}, config.model={self.config.get('model', 'N/A')}, config.siliconflow_model={self.config.get('siliconflow_model', 'N/A')}, env={os.getenv('SILICONFLOW_MODEL', 'N/A')}, final={model}")
         self.provider = SiliconFlowEmbedding(api_key, model)
         logger.info(f"✅ 使用硅基流动 Embedding: {model}")
+
+    def _init_sentence_transformer(self):
+        """初始化本地SentenceTransformer"""
+        model_name = self.config.get('model', 'BAAI/bge-m3')
+        self.provider = SentenceTransformerEmbedding(model_name)
+        logger.info(f"✅ 使用SentenceTransformer Embedding: {model_name}")
+
     def _init_openai(self):
         """初始化OpenAI"""
         api_key = self.config.get('openai_api_key')

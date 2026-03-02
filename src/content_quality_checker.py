@@ -251,12 +251,19 @@ class ContentQualityChecker:
         
         # 2. 检查具体数字和时间
         numbers = re.findall(r'\d+年|\d+岁|\d+元|\d+月|\d+日|\d+万元|\d+块钱', content)
-        if len(numbers) < 3:
+        if len(numbers) == 0:
             self.issues.append(QualityIssue(
                 type='缺乏具体信息',
                 description='内容中缺乏具体的时间、数字等可核实信息',
                 severity='high',
                 suggestion='补充具体的时间、金额、数量等可核实信息'
+            ))
+        elif len(numbers) < 2:
+            self.issues.append(QualityIssue(
+                type='缺乏具体信息',
+                description='具体时间或数字信息偏少',
+                severity='medium',
+                suggestion='增加更多可核实的时间、金额、数量等信息'
             ))
         
         # 3. 检查具体地名和人名

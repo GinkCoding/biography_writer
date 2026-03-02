@@ -1,4 +1,5 @@
 """第一层：数据接入与解析层 (Data Ingestion)"""
+import asyncio
 import re
 import sqlite3
 import json
@@ -738,12 +739,14 @@ class VectorStore:
             logger.debug(f"  第 {batch_num} 批：{len(batch_contents)} 个文本")
             
             try:
-                batch_embeddings = self.embedding_mgr.encode(batch_contents)
+                batch_embeddings = np.asarray(
+                    self.embedding_mgr.encode(batch_contents),
+                    dtype=np.float32,
+                )
                 embeddings_list.append(batch_embeddings)
             except Exception as e:
                 logger.error(f"第 {batch_num} 批生成失败：{e}")
-                import numpy as np
-                zero_embeddings = np.zeros((len(batch_contents), 768))
+                zero_embeddings = np.zeros((len(batch_contents), 768), dtype=np.float32)
                 embeddings_list.append(zero_embeddings)
         
         # 合并所有批次
@@ -763,7 +766,8 @@ class VectorStore:
             # 序列化embedding
             embedding_blob = None
             if embeddings is not None:
-                embedding_blob = embeddings[i].tobytes()
+                # 强制存储为float32，避免读取时维度错位
+                embedding_blob = np.asarray(embeddings[i], dtype=np.float32).tobytes()
 
             cursor.execute('''
                 INSERT INTO materials
@@ -857,7 +861,17 @@ class VectorStore:
             if embedding_bytes:
                 doc_embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
                 # 计算余弦相似度（向量已归一化）
-                similarity = np.dot(query_embedding, doc_embedding)
+                if query_embedding.shape[0] != doc_embedding.shape[0]:
+                    dim = min(query_embedding.shape[0], doc_embedding.shape[0])
+                    if dim == 0:
+                        continue
+                    logger.warning(
+                        f"向量维度不一致，按最小维度截断: "
+                        f"query={query_embedding.shape[0]}, doc={doc_embedding.shape[0]}"
+                    )
+                    similarity = np.dot(query_embedding[:dim], doc_embedding[:dim])
+                else:
+                    similarity = np.dot(query_embedding, doc_embedding)
                 scored_results.append((material_id, float(similarity)))
 
         # 按相似度排序
@@ -1105,7 +1119,17 @@ class VectorStore:
                 doc_embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
 
                 # 计算余弦相似度（向量已归一化）
-                similarity = np.dot(query_embedding, doc_embedding)
+                if query_embedding.shape[0] != doc_embedding.shape[0]:
+                    dim = min(query_embedding.shape[0], doc_embedding.shape[0])
+                    if dim == 0:
+                        continue
+                    logger.warning(
+                        f"向量维度不一致，按最小维度截断: "
+                        f"query={query_embedding.shape[0]}, doc={doc_embedding.shape[0]}"
+                    )
+                    similarity = np.dot(query_embedding[:dim], doc_embedding[:dim])
+                else:
+                    similarity = np.dot(query_embedding, doc_embedding)
 
                 # 提取元数据
                 material = InterviewMaterial(
@@ -1452,7 +1476,7 @@ class DataIngestionLayer:
         else:
             raise ValueError(f"不支持的文件格式: {suffix}")
     
-    async def retrieve_for_chapter(
+    async def _retrieve_for_chapter_async(
         self,
         chapter_title: str,
         chapter_summary: str,
@@ -1509,6 +1533,53 @@ class DataIngestionLayer:
                     materials.append(m)
 
         return materials[:n_results]
+
+    async def retrieve_for_chapter_async(
+        self,
+        chapter_title: str,
+        chapter_summary: str,
+        time_period: Optional[str] = None,
+        n_results: int = 10,
+        use_hybrid: bool = True,
+        use_parent_backtrack: bool = False,
+    ) -> List[InterviewMaterial]:
+        """异步检索接口."""
+        return await self._retrieve_for_chapter_async(
+            chapter_title=chapter_title,
+            chapter_summary=chapter_summary,
+            time_period=time_period,
+            n_results=n_results,
+            use_hybrid=use_hybrid,
+            use_parent_backtrack=use_parent_backtrack,
+        )
+
+    def retrieve_for_chapter(
+        self,
+        chapter_title: str,
+        chapter_summary: str,
+        time_period: Optional[str] = None,
+        n_results: int = 10,
+        use_hybrid: bool = True,
+        use_parent_backtrack: bool = False,
+    ):
+        """同步优先接口（向后兼容）。
+
+        - 在同步上下文中直接返回 `List[InterviewMaterial]`
+        - 在异步上下文中返回可 `await` 的协程
+        """
+        coro = self._retrieve_for_chapter_async(
+            chapter_title=chapter_title,
+            chapter_summary=chapter_summary,
+            time_period=time_period,
+            n_results=n_results,
+            use_hybrid=use_hybrid,
+            use_parent_backtrack=use_parent_backtrack,
+        )
+        try:
+            asyncio.get_running_loop()
+            return coro
+        except RuntimeError:
+            return asyncio.run(coro)
 
     def get_retrieval_stats(self) -> Dict[str, int]:
         """获取检索系统统计信息"""

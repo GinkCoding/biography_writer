@@ -26,6 +26,7 @@ from src.layers.data_ingestion import VectorStore
 from src.utils import count_chinese_words, truncate_text, generate_id
 from src.context_assembler import (
     ProgressiveContextAssembler, ContextLevel, ContextLevelSelector,
+    ContextPriority,
     TokenBudget, LoadedContext
 )
 from src.prompt_manager import PromptManager, get_prompt_manager
@@ -38,8 +39,10 @@ from src.agents import ContextAgent, ContextContract, DataAgent, ExtractionResul
 PLACEHOLDER_PATTERNS = [
     r'鉴于.*尚待补充',
     r'此处为通用型.*模板',
+    r'此处需要补充.*',
     r'.*待补充.*',
     r'.*待完善.*',
+    r'.*待后续完善.*',
     r'.*待填写.*',
     r'请补充具体细节',
     r'此处需要展开',
@@ -78,6 +81,60 @@ TEMPLATE_PHRASES = [
 # 注意：ContextAssembler 类已被 ProgressiveContextAssembler 替代
 # 旧实现保留在 src/context_assembler.py 中用于向后兼容
 # 新的渐进式上下文加载请使用 ProgressiveContextAssembler
+
+
+class ContextAssembler:
+    """向后兼容包装器.
+
+    兼容旧调用方行为：
+    1. `assemble_context` 返回 prompt-ready dict（而不是 LoadedContext）。
+    2. `_retrieve_materials_enhanced` 只返回素材文本（忽略 coverage_info）。
+    """
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        vector_store: VectorStore,
+        budget: Optional[TokenBudget] = None,
+    ):
+        self._delegate = ProgressiveContextAssembler(
+            llm=llm,
+            vector_store=vector_store,
+            budget=budget or TokenBudget(),
+        )
+
+    async def assemble_context(
+        self,
+        section: SectionOutline,
+        chapter: ChapterOutline,
+        outline: BookOutline,
+        global_state: Dict,
+        previous_section_summary: Optional[str] = None,
+        generated_sections: Optional[List[GeneratedSection]] = None,
+    ) -> Dict[str, str]:
+        loaded = await self._delegate.assemble_context(
+            section=section,
+            chapter=chapter,
+            outline=outline,
+            global_state=global_state,
+            level=ContextLevel.L1_ESSENTIAL,
+            previous_section_summary=previous_section_summary,
+            generated_sections=generated_sections,
+        )
+        return self._delegate.to_prompt_context(loaded)
+
+    async def _retrieve_materials_enhanced(
+        self,
+        section: SectionOutline,
+        chapter: ChapterOutline,
+        budget: Optional[int] = None,
+    ) -> str:
+        materials_text, _ = await self._delegate._retrieve_materials_enhanced(
+            section=section,
+            chapter=chapter,
+            budget=budget or (self._delegate.budget.context // 3),
+        )
+        return materials_text
 
 
 class ContentGenerationEngine:
@@ -791,6 +848,7 @@ async def generate_with_context_level(
 # 导出主要类供外部使用
 __all__ = [
     # 核心类
+    'ContextAssembler',
     'IterativeGenerationLayer',
     'ContentGenerationEngine',
     'ProgressiveContextAssembler',

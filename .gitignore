@@ -10,6 +10,7 @@ __pycache__/
 .vector_db/
 .observability/
 output/
+.venv/
 *.log
 
 # Secrets / local envs
