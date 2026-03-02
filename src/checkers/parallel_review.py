@@ -217,7 +217,7 @@ class ParallelReview:
             for future in as_completed(future_to_dimension):
                 dimension = future_to_dimension[future]
                 try:
-                    report = future.result(timeout=60)  # 60秒超时
+                    report = future.result(timeout=180)  # 60秒超时
                     dimension_reports[dimension.value] = report
                 except Exception as e:
                     logger.error(f"Checker {dimension.value} failed: {e}")

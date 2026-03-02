@@ -44,14 +44,16 @@ class LLMClient:
         self.temperature = settings.model.temperature
         self.max_attempts = max(1, int(getattr(settings.retry, "max_attempts", 3)))
         self.backoff_factor = max(1, int(getattr(settings.retry, "backoff_factor", 2)))
-        self.request_timeout_seconds = max(
-            10,
-            int(
-                os.getenv(
-                    "LLM_REQUEST_TIMEOUT_SECONDS",
-                    str(getattr(settings.model, "request_timeout_seconds", 300)),
-                )
-            ),
+        configured_timeout = int(
+            os.getenv(
+                "LLM_REQUEST_TIMEOUT_SECONDS",
+                str(getattr(settings.model, "request_timeout_seconds", 300)),
+            )
+        )
+        timeout_upper_bound = int(os.getenv("LLM_REQUEST_TIMEOUT_MAX_SECONDS", "300"))
+        self.request_timeout_seconds = min(
+            max(10, timeout_upper_bound),
+            max(10, configured_timeout),
         )
         self.heartbeat_interval_seconds = max(
             3,
@@ -62,12 +64,22 @@ class LLMClient:
                 )
             ),
         )
+        self.auto_stream_enabled = os.getenv("LLM_AUTO_STREAM", "0").lower() not in {"0", "false", "no"}
+        self.auto_stream_min_tokens = max(
+            256,
+            int(os.getenv("LLM_AUTO_STREAM_MIN_TOKENS", "1200")),
+        )
+        self.stream_first_chunk_timeout_seconds = max(
+            5,
+            int(os.getenv("LLM_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS", "24")),
+        )
 
         # 初始化可观测性组件
         self.metrics = MetricsCollector()
         self.tracer = WorkflowTracer()
         self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).parent.parent)
         self._progress_callback: Optional[Callable[[str], None]] = None
+        self._stream_available: Optional[bool] = None
 
         # 初始化对应提供商的客户端
         self._init_client()
@@ -198,6 +210,9 @@ class LLMClient:
         """
         temp = temperature or self.temperature
         max_tok = max_tokens or self.max_tokens
+        use_stream = stream or (self.auto_stream_enabled and max_tok >= self.auto_stream_min_tokens)
+        if use_stream and self._stream_available is False:
+            use_stream = False
 
         prompt_text = "\n".join([m.get("content", "") for m in messages])
         prompt_tokens = len(prompt_text) // 4  # 粗略估算
@@ -214,6 +229,7 @@ class LLMClient:
                     "temperature": temp,
                     "max_tokens": max_tok,
                     "attempt": attempt,
+                    "stream": use_stream,
                 },
             )
             self.runtime_monitor.log_event(
@@ -225,6 +241,7 @@ class LLMClient:
                     "model": self.model,
                     "temperature": temp,
                     "max_tokens": max_tok,
+                    "stream": use_stream,
                 },
             )
             self._notify_progress(
@@ -233,18 +250,29 @@ class LLMClient:
             start_time = datetime.now()
 
             try:
-                if self.provider in ["kimi", "openai"]:
+                if use_stream:
                     result = await self._wait_with_heartbeat(
-                        self._call_openai_compatible(messages, temp, max_tok),
-                        attempt=attempt,
-                    )
-                elif self.provider == "zhipuai":
-                    result = await self._wait_with_heartbeat(
-                        self._call_zhipuai(messages, temp, max_tok),
+                        self._collect_stream_response(
+                            messages=messages,
+                            temperature=temp,
+                            max_tokens=max_tok,
+                            attempt=attempt,
+                        ),
                         attempt=attempt,
                     )
                 else:
-                    raise ValueError(f"不支持的提供商: {self.provider}")
+                    if self.provider in ["kimi", "openai"]:
+                        result = await self._wait_with_heartbeat(
+                            self._call_openai_compatible(messages, temp, max_tok),
+                            attempt=attempt,
+                        )
+                    elif self.provider == "zhipuai":
+                        result = await self._wait_with_heartbeat(
+                            self._call_zhipuai(messages, temp, max_tok),
+                            attempt=attempt,
+                        )
+                    else:
+                        raise ValueError(f"不支持的提供商: {self.provider}")
 
                 duration_ms = (datetime.now() - start_time).total_seconds() * 1000
                 completion_tokens = len(result) // 4
@@ -314,6 +342,80 @@ class LLMClient:
             raise last_error
         raise RuntimeError("LLM调用失败")
 
+    async def _collect_stream_response(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        attempt: int,
+    ) -> str:
+        """流式收集响应并周期输出接收进度。"""
+        stream_iterator = self.complete_stream(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        chunks: List[str] = []
+        received_chars = 0
+        next_report_at = 200
+
+        async def _fallback_non_stream() -> str:
+            self._stream_available = False
+            self._notify_progress(
+                f"流式首包超时，回退非流式请求 (attempt={attempt}/{self.max_attempts})"
+            )
+            self.runtime_monitor.log_event(
+                stage="llm.stream",
+                status="warning",
+                message="流式首包超时，回退非流式请求",
+                metadata={"attempt": attempt},
+            )
+            if self.provider in ["kimi", "openai"]:
+                return await self._call_openai_compatible(messages, temperature, max_tokens)
+            if self.provider == "zhipuai":
+                return await self._call_zhipuai(messages, temperature, max_tokens)
+            raise ValueError(f"不支持的提供商: {self.provider}")
+
+        try:
+            first_chunk = await asyncio.wait_for(
+                stream_iterator.__anext__(),
+                timeout=self.stream_first_chunk_timeout_seconds,
+            )
+        except StopAsyncIteration:
+            return ""
+        except Exception:
+            try:
+                await stream_iterator.aclose()
+            except Exception:
+                pass
+            return await _fallback_non_stream()
+
+        if first_chunk:
+            self._stream_available = True
+            chunks.append(first_chunk)
+            received_chars += len(first_chunk)
+
+        async for chunk in stream_iterator:
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            received_chars += len(chunk)
+
+            if received_chars >= next_report_at:
+                progress_msg = (
+                    f"LLM流式接收中... 已接收{received_chars}字符 "
+                    f"(attempt={attempt}/{self.max_attempts})"
+                )
+                self._notify_progress(progress_msg)
+                self.runtime_monitor.heartbeat(
+                    stage="llm.stream",
+                    message=progress_msg,
+                    metadata={"attempt": attempt, "received_chars": received_chars},
+                )
+                next_report_at += 300
+
+        return "".join(chunks).strip()
+
     async def _call_openai_compatible(
         self,
         messages: List[Dict[str, str]],
@@ -379,7 +481,7 @@ class LLMClient:
         temp = temperature or self.temperature
         max_tok = max_tokens or self.max_tokens
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _stream():
             if self.provider in ['kimi', 'openai']:

@@ -726,7 +726,7 @@ class ContextAgent:
         all_results = []
         for query in queries:
             if query.strip():
-                results = self.vector_store.search(query, n_results=n_results)
+                results = await self._search_materials_async(query, n_results=n_results)
                 all_results.extend(results)
 
         # 按相似度排序并去重
@@ -771,6 +771,45 @@ class ContextAgent:
         materials_text = "\n".join(material_texts) if material_texts else "（未检索到相关素材）"
 
         return materials_text, coverage_info
+
+    async def _search_materials_async(
+        self,
+        query: str,
+        n_results: int = 10,
+    ) -> List[Tuple[InterviewMaterial, float]]:
+        """异步安全检索，避免在事件循环里调用同步 `search`。"""
+        if not query.strip():
+            return []
+
+        try:
+            hybrid_results = await self.vector_store.hybrid_search(
+                query=query,
+                n_results=n_results,
+                enable_rerank=False,
+            )
+            if hybrid_results:
+                converted: List[Tuple[InterviewMaterial, float]] = []
+                for item in hybrid_results:
+                    score = float(item.rrf_score or item.vector_score or item.bm25_score or item.rerank_score or 0.0)
+                    converted.append((item.material, score))
+                return converted
+        except Exception as exc:
+            logger.warning(f"ContextAgent混合检索失败，回退向量检索: {exc}")
+
+        try:
+            vector_hits = self.vector_store.vector_search(query, top_k=n_results)
+            if not vector_hits:
+                return []
+            material_ids = [material_id for material_id, _ in vector_hits]
+            materials_map = self.vector_store._get_materials_by_ids(material_ids)
+            return [
+                (materials_map[material_id], score)
+                for material_id, score in vector_hits
+                if material_id in materials_map
+            ]
+        except Exception as exc:
+            logger.warning(f"ContextAgent向量检索回退失败: {exc}")
+            return []
 
     def analyze_sensory_details(self, materials_text: str) -> Dict[str, List[str]]:
         """分析素材中的感官描述细节"""

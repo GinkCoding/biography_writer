@@ -687,10 +687,21 @@ def _normalize_sensory_details(data):
     """将 sensory_details 转换为 Dict[str, List[str]] 格式"""
     if not data:
         return {}
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return {}
+        # 允许模型返回纯文本描述，统一放入“visual”槽位
+        return {"visual": [text]}
+    if isinstance(data, list):
+        normalized = [str(item).strip() for item in data if str(item).strip()]
+        return {"visual": normalized} if normalized else {}
+    if not isinstance(data, dict):
+        return {}
     result = {}
     for key, value in data.items():
         if isinstance(value, list):
-            result[key] = value
+            result[key] = [str(item).strip() for item in value if str(item).strip()]
         elif isinstance(value, str):
             # 字符串转列表
             result[key] = [value] if value.strip() else []

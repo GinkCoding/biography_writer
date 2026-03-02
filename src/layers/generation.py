@@ -242,6 +242,7 @@ class ContentGenerationEngine:
                     messages,
                     temperature=0.7,
                     max_tokens=min(4000, max(1200, target_words * 2)),
+                    stream=True,
                 )
             else:
                 candidate = await self._rewrite_problematic_content(
@@ -311,6 +312,7 @@ class ContentGenerationEngine:
             messages,
             temperature=0.45,
             max_tokens=min(4000, max(1200, target_words * 2)),
+            stream=True,
         )
         return rewritten.strip()
     
@@ -576,7 +578,12 @@ class ContentGenerationEngine:
             {"role": "user", "content": prompt}
         ]
         
-        expanded = await self.llm.complete(messages, temperature=0.65)
+        expanded = await self.llm.complete(
+            messages,
+            temperature=0.65,
+            max_tokens=min(4000, max(1200, additional_words * 2)),
+            stream=True,
+        )
         return expanded.strip()
 
 

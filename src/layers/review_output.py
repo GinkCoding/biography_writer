@@ -8,7 +8,7 @@
 import json
 import re
 import difflib
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any, Tuple
 from pathlib import Path
 from datetime import datetime
 from loguru import logger
@@ -21,6 +21,7 @@ from src.models import (
 from src.utils import save_json, count_chinese_words, sanitize_filename
 from src.generator.book_finalizer import BookFinalizer, ChapterVersion
 from src.prompt_manager import PromptManager, get_prompt_manager, ContextLevel
+from src.observability.runtime_monitor import get_runtime_monitor
 
 # 六维并行审查系统
 from src.checkers import (
@@ -642,6 +643,17 @@ class ConsistencyChecker:
         self.subject_name = timeline.subject.name if timeline.subject else "传主"
         self.quality_checker = ContentQualityChecker()
         self.repetition_checker = ContentRepetitionChecker()
+        self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).resolve().parents[2])
+        self._fact_query_rewrite_mode: bool = False
+        self._last_claim_reports: Dict[str, Dict[str, Any]] = {}
+
+    def set_fact_check_mode(self, query_rewrite: bool = False) -> None:
+        """设置事实核查模式（用于停滞时动态切换策略）。"""
+        self._fact_query_rewrite_mode = query_rewrite
+
+    def get_last_claim_report(self, section_id: str) -> Optional[Dict[str, Any]]:
+        """获取最近一次claim核查报告。"""
+        return self._last_claim_reports.get(section_id)
     
     async def check_section(
         self,
@@ -684,68 +696,371 @@ class ConsistencyChecker:
             is_consistent=is_consistent,
             violations=violations,
             suggestions=self._generate_suggestions(violations),
-            confidence=1.0 - (len(violations) * 0.05)
+            confidence=max(0.0, min(1.0, 1.0 - (len(violations) * 0.05)))
         )
     
     async def _check_facts(self, section: GeneratedSection) -> List[Dict]:
-        """检查基础事实"""
-        violations = []
+        """Claim级事实核查：拆claim -> 检索证据 -> 逐claim判定。"""
         content = section.content
-        
-        # 从时间线中提取关键事实
-        timeline_facts = []
-        for event in self.timeline.events:
-            if event.title and len(event.title) > 2:
-                timeline_facts.append(event.title)
-        
-        # 使用LLM检查事实冲突
-        prompt = f"""请检查以下内容是否与已知事实存在冲突，并检测AI生成痕迹：
+        violations: List[Dict[str, Any]] = []
 
-=== 已知事实（来自原始采访）===
-{chr(10).join(timeline_facts[:10])}
+        claims = await self._extract_checkable_claims(content)
+        if not claims:
+            return violations
 
-=== 待检查内容 ===
-{content[:1000]}
+        claim_payloads: List[Dict[str, Any]] = []
+        for claim in claims[:12]:
+            evidences = self._retrieve_claim_evidence(claim, top_k=3)
+            claim_payloads.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "claim_text": claim["claim_text"],
+                    "sentence_fragment": claim.get("sentence_fragment", ""),
+                    "evidence_candidates": evidences,
+                }
+            )
 
-=== 检查要求 ===
-1. 如果内容提及了上述事实，检查描述是否一致
-2. 识别是否存在"无中生有"的人物或事件
-3. 检查时间顺序是否合理
-4. 【新增】检查是否包含AI占位符（如"待补充"、"模板内容"等）
-5. 【新增】检查是否有明显的模板化、套话式表达
-6. 【新增】检查内容是否有实质性信息，而非空洞填充
+        verdicts = await self._verify_claims_batch(claim_payloads)
+        verdict_map = {v["claim_id"]: v for v in verdicts}
 
-请以JSON格式返回发现的问题（如果没有问题返回空列表）：
-[
-  {{
-    "type": "事实冲突/无中生有/时间错误/AI占位符/模板化内容/内容空洞",
-    "description": "具体问题描述",
-    "location": "问题出现在文中的位置"
-  }}
-]
-"""
-        
-        messages = [
-            {"role": "system", "content": "你是一位严格的事实核查编辑，专门检测AI生成内容的痕迹。"},
-            {"role": "user", "content": prompt}
-        ]
-        
-        try:
-            response = await self.llm.complete(messages, temperature=0.2)
-            issues = self._parse_json_array(response)
-            
-            for issue in issues:
-                issue_type = issue.get("type", "未知")
-                severity = "high" if any(kw in issue_type for kw in ["冲突", "占位符"]) else "medium"
-                violations.append({
-                    "type": issue_type,
-                    "description": issue.get("description", ""),
-                    "severity": severity
-                })
-        except Exception as e:
-            logger.warning(f"事实核查失败: {e}")
-        
+        structured_results: List[Dict[str, Any]] = []
+        for payload in claim_payloads:
+            claim_id = payload["claim_id"]
+            verdict = verdict_map.get(
+                claim_id,
+                {
+                    "claim_id": claim_id,
+                    "verdict": "insufficient",
+                    "evidence_snippet": "证据不足",
+                    "confidence": 0.0,
+                    "failure_reason": "模型未返回该claim的核查结果",
+                },
+            )
+            structured_results.append(verdict)
+
+            claim_text = payload["claim_text"]
+            sentence_fragment = payload.get("sentence_fragment", "")
+            confidence = float(verdict.get("confidence", 0.0))
+            verdict_type = verdict.get("verdict", "insufficient")
+            failure_reason = verdict.get("failure_reason", "")
+            evidence_snippet = verdict.get("evidence_snippet", "")
+
+            if verdict_type == "supported" and confidence >= 0.65:
+                continue
+
+            issue_type = "事实冲突" if verdict_type == "contradicted" else "证据不足"
+            severity = "high" if verdict_type == "contradicted" or confidence < 0.45 else "medium"
+            violations.append(
+                {
+                    "type": "事实核查-Claim失败",
+                    "description": f"[{claim_id}] {issue_type}：{failure_reason or '缺少可验证证据'}",
+                    "severity": severity,
+                    "claim_id": claim_id,
+                    "claim_text": claim_text,
+                    "sentence_fragment": sentence_fragment or claim_text[:80],
+                    "evidence_snippet": evidence_snippet,
+                    "confidence": confidence,
+                    "failure_reason": failure_reason or "证据不足",
+                    "verdict": verdict_type,
+                    "check_scope": "claim",
+                }
+            )
+
+        report = {
+            "section_id": section.id,
+            "query_rewrite_mode": self._fact_query_rewrite_mode,
+            "claims": claim_payloads,
+            "results": structured_results,
+            "generated_at": datetime.now().isoformat(),
+            "required_schema": [
+                "claim_id",
+                "evidence_snippet",
+                "confidence",
+                "failure_reason",
+            ],
+        }
+        self._last_claim_reports[section.id] = report
+        self.runtime_monitor.save_json_artifact(
+            name=f"fact_claims_{sanitize_filename(section.id)}.json",
+            data=report,
+            stage="05_review",
+        )
+
         return violations
+
+    async def _extract_checkable_claims(self, content: str) -> List[Dict[str, str]]:
+        """拆解文本中的可核查claim。"""
+        prompt = f"""请从以下文本中提取“可核查事实claim”，只保留可被采访素材验证的陈述。
+
+=== 文本 ===
+{content[:2200]}
+
+必须输出JSON对象（禁止输出解释）：
+{{
+  "claims": [
+    {{
+      "claim_id": "C1",
+      "claim_text": "完整claim",
+      "sentence_fragment": "claim所在原句片段"
+    }}
+  ]
+}}
+
+要求：
+1. claim_id 必须连续编号 C1, C2, C3...
+2. 每条claim必须是“可核查的事实”，不要主观感受
+3. 最多返回12条
+"""
+        try:
+            response = await self.llm.complete(
+                [
+                    {"role": "system", "content": "你是事实抽取器，只输出JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=1800,
+            )
+            payload = self._extract_json_object(response)
+            raw_claims = payload.get("claims", []) if isinstance(payload, dict) else []
+            claims = self._sanitize_claims(raw_claims)
+            if claims:
+                return claims[:12]
+        except Exception as exc:
+            logger.warning(f"claim提取失败，回退规则抽取: {exc}")
+
+        return self._fallback_claim_extraction(content)
+
+    def _sanitize_claims(self, raw_claims: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        claims: List[Dict[str, str]] = []
+        for idx, item in enumerate(raw_claims, 1):
+            if not isinstance(item, dict):
+                continue
+            claim_text = str(item.get("claim_text", "")).strip()
+            if len(claim_text) < 8:
+                continue
+            sentence_fragment = str(item.get("sentence_fragment", "")).strip() or claim_text[:80]
+            claims.append(
+                {
+                    "claim_id": f"C{idx}",
+                    "claim_text": claim_text[:220],
+                    "sentence_fragment": sentence_fragment[:120],
+                }
+            )
+        return claims
+
+    def _fallback_claim_extraction(self, content: str) -> List[Dict[str, str]]:
+        """模型抽取失败时，规则兜底。"""
+        fragments = re.split(r"[。！？\n]+", content)
+        candidates: List[str] = []
+        for fragment in fragments:
+            sentence = fragment.strip()
+            if len(sentence) < 10:
+                continue
+            is_fact_like = bool(
+                re.search(r"\d{4}年|\d+岁|\d+月|\d+日|在[\u4e00-\u9fff]{2,8}(?:市|县|镇|村)", sentence)
+            ) or len(re.findall(r"[\u4e00-\u9fff]{2,4}", sentence)) >= 3
+            if is_fact_like:
+                candidates.append(sentence)
+            if len(candidates) >= 12:
+                break
+
+        if not candidates:
+            candidates = [s.strip() for s in fragments if len(s.strip()) >= 12][:6]
+
+        return [
+            {
+                "claim_id": f"C{i + 1}",
+                "claim_text": c[:220],
+                "sentence_fragment": c[:120],
+            }
+            for i, c in enumerate(candidates)
+        ]
+
+    def _retrieve_claim_evidence(self, claim: Dict[str, str], top_k: int = 3) -> List[Dict[str, Any]]:
+        """基于timeline/source_text检索与claim最相关的证据。"""
+        claim_text = claim.get("claim_text", "")
+        if not claim_text:
+            return []
+
+        query_text = self._rewrite_claim_query(claim_text) if self._fact_query_rewrite_mode else claim_text
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+
+        for event in self.timeline.events:
+            evidence_text_parts = [
+                event.title or "",
+                event.description or "",
+                event.scene_description or "",
+                event.source_text or "",
+                event.date or "",
+                event.location or "",
+                " ".join(event.characters_involved[:5]) if event.characters_involved else "",
+            ]
+            evidence_text = " ".join([p for p in evidence_text_parts if p]).strip()
+            if not evidence_text:
+                continue
+
+            score = self._score_evidence_match(query_text, evidence_text)
+            if score <= 0:
+                continue
+
+            snippet_source = event.source_text or event.description or event.title
+            snippet = snippet_source[:220] if snippet_source else ""
+            scored.append(
+                (
+                    score,
+                    {
+                        "event_id": event.id,
+                        "title": event.title,
+                        "date": event.date,
+                        "source_material_id": event.source_material_id,
+                        "snippet": snippet,
+                        "score": round(score, 4),
+                    },
+                )
+            )
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:top_k]]
+
+    def _rewrite_claim_query(self, claim_text: str) -> str:
+        """停滞时改写检索查询，扩大召回。"""
+        time_tokens = re.findall(r"\d{4}年|\d+岁|\d+月|\d+日", claim_text)
+        zh_tokens = re.findall(r"[\u4e00-\u9fff]{2,6}", claim_text)
+        dedup: List[str] = []
+        for tok in time_tokens + zh_tokens:
+            if tok not in dedup:
+                dedup.append(tok)
+        return " ".join(dedup[:10]) if dedup else claim_text
+
+    def _score_evidence_match(self, query: str, evidence_text: str) -> float:
+        """启发式证据相关度评分。"""
+        if not query or not evidence_text:
+            return 0.0
+        query_tokens = set(re.findall(r"\d{4}年|\d+岁|[\u4e00-\u9fff]{2,6}", query))
+        if not query_tokens:
+            return 0.0
+
+        overlap = sum(1 for token in query_tokens if token in evidence_text)
+        coverage = overlap / max(1, len(query_tokens))
+        sequence_ratio = difflib.SequenceMatcher(None, query[:180], evidence_text[:240]).ratio()
+
+        year_bonus = 0.0
+        for year in re.findall(r"\d{4}", query):
+            if year in evidence_text:
+                year_bonus = 0.12
+                break
+
+        return min(1.0, coverage * 0.62 + sequence_ratio * 0.38 + year_bonus)
+
+    async def _verify_claims_batch(self, claim_payloads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """批量判定claim是否被证据支持，输出强结构化JSON。"""
+        if not claim_payloads:
+            return []
+
+        schema_hint = {
+            "results": [
+                {
+                    "claim_id": "C1",
+                    "verdict": "supported|contradicted|insufficient",
+                    "evidence_snippet": "证据片段",
+                    "confidence": 0.0,
+                    "failure_reason": "",
+                }
+            ]
+        }
+        prompt = f"""你是事实核查器。请严格按JSON返回，不要输出任何解释。
+
+输出JSON Schema（必须包含以下字段）：
+{json.dumps(schema_hint, ensure_ascii=False, indent=2)}
+
+判定规则：
+1. 若证据支持claim，verdict= supported，failure_reason 置空字符串
+2. 若证据与claim冲突，verdict= contradicted，并说明failure_reason
+3. 若证据不足，verdict= insufficient，并说明failure_reason
+4. confidence 必须是0~1的数字
+5. 每条claim必须返回一条结果；claim_id 必须和输入一致
+6. evidence_snippet 必须来自候选证据摘要，不能编造
+
+待核查数据：
+{json.dumps(claim_payloads, ensure_ascii=False)}
+"""
+        try:
+            response = await self.llm.complete(
+                [
+                    {"role": "system", "content": "你是严谨的事实核查模型，输出必须是合法JSON对象。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=min(3200, 360 + 220 * len(claim_payloads)),
+            )
+            payload = self._extract_json_object(response)
+            raw_results = payload.get("results", []) if isinstance(payload, dict) else []
+        except Exception as exc:
+            logger.warning(f"claim批量核查失败: {exc}")
+            raw_results = []
+
+        raw_map: Dict[str, Dict[str, Any]] = {}
+        for item in raw_results:
+            if isinstance(item, dict):
+                cid = str(item.get("claim_id", "")).strip()
+                if cid:
+                    raw_map[cid] = item
+
+        sanitized: List[Dict[str, Any]] = []
+        for payload in claim_payloads:
+            claim_id = payload["claim_id"]
+            candidate = raw_map.get(claim_id, {})
+            sanitized.append(self._sanitize_claim_verdict(claim_id, candidate))
+        return sanitized
+
+    def _sanitize_claim_verdict(self, claim_id: str, raw: Dict[str, Any]) -> Dict[str, Any]:
+        verdict_raw = str(raw.get("verdict", "insufficient")).strip().lower()
+        verdict = verdict_raw if verdict_raw in {"supported", "contradicted", "insufficient"} else "insufficient"
+
+        confidence_raw = raw.get("confidence", 0.0)
+        try:
+            confidence = float(confidence_raw)
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+
+        evidence_snippet = str(raw.get("evidence_snippet", "")).strip()
+        if not evidence_snippet:
+            evidence_snippet = "证据不足"
+
+        failure_reason = str(raw.get("failure_reason", "")).strip()
+        if verdict != "supported" and not failure_reason:
+            failure_reason = "证据不足或与素材冲突"
+        if verdict == "supported":
+            failure_reason = ""
+
+        return {
+            "claim_id": claim_id,
+            "verdict": verdict,
+            "evidence_snippet": evidence_snippet[:240],
+            "confidence": confidence,
+            "failure_reason": failure_reason[:180],
+        }
+
+    def _extract_json_object(self, text: str) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"results": parsed}
+        except Exception:
+            pass
+
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
     
     async def _check_timeline(
         self,
@@ -840,6 +1155,8 @@ class ConsistencyChecker:
                 suggestions.append("删除重复内容，保持叙述简洁")
             elif "空洞" in vtype:
                 suggestions.append("增加人物对话、具体数字和可核实的事实")
+            elif "Claim失败" in vtype or "证据不足" in vtype:
+                suggestions.append("按claim逐条核对证据，仅重写失败claim对应句段")
             elif "事实" in vtype:
                 suggestions.append("请对照原始采访材料核实该事实")
             elif "时间" in vtype:
@@ -1100,6 +1417,7 @@ class DualAgentReviewer:
         # 重写历史追踪，防止死循环 - 使用语义指纹而非文本指纹
         # 结构: {section_id: [{"embedding": [...], "issues": [...], "quality_score": float}]}
         self._rewrite_history: Dict[str, List[Dict]] = {}
+        self._fact_stagnation_history: Dict[str, List[Dict[str, Any]]] = {}
     
     async def review_and_refine(
         self,
@@ -1131,13 +1449,17 @@ class DualAgentReviewer:
             logger.warning(f"语义指纹生成失败，使用文本指纹: {e}")
             original_semantic_fp = {"type": "text", "hash": self._text_fingerprint(section.content)}
 
+        fact_query_rewrite = False
         for iteration in range(min(max_iterations, self.MAX_REWRITE_ATTEMPTS)):
             logger.info(f"审查迭代 {iteration + 1}/{min(max_iterations, self.MAX_REWRITE_ATTEMPTS)}")
 
             rewrite_needed = False
             rewrite_reason = ""
+            terminal_failure = False
+            fact_stagnated = False
 
             # 1. 事实核查
+            self.checker_agent.set_fact_check_mode(query_rewrite=fact_query_rewrite)
             check_result = await self.checker_agent.check_section(
                 current_section, chapter_context
             )
@@ -1148,6 +1470,14 @@ class DualAgentReviewer:
             if high_severity:
                 logger.warning(f"事实核查：发现 {len(high_severity)} 个严重问题")
                 current_section.issues = [v.get("description", "") for v in high_severity]
+                fact_stagnated = self._detect_fact_stagnation(section_id, high_severity)
+                if fact_stagnated:
+                    fact_query_rewrite = True
+                    logger.warning("事实核查停滞：连续两轮问题类型不变或置信度无提升，切换到短句修复+查询改写策略")
+                    if "[人工介入标记] 事实核查停滞，建议人工抽检关键claim" not in current_section.issues:
+                        current_section.issues.append("[人工介入标记] 事实核查停滞，建议人工抽检关键claim")
+                else:
+                    fact_query_rewrite = False
 
                 if iteration < self.MAX_REWRITE_ATTEMPTS - 1:
                     rewrite_needed = True
@@ -1156,14 +1486,17 @@ class DualAgentReviewer:
                     # 达到最大迭代次数，标记为未通过但事实核查已尽力
                     current_section.facts_verified = False
                     logger.error(f"达到最大重写次数，仍有 {len(high_severity)} 个严重问题未解决")
+                    terminal_failure = True
 
             elif medium_severity:
                 logger.info(f"事实核查：发现 {len(medium_severity)} 个中等问题，继续检查")
                 current_section.issues.extend([v.get("description", "") for v in medium_severity])
                 current_section.facts_verified = True
+                fact_query_rewrite = False
             else:
                 logger.info("事实核查通过")
                 current_section.facts_verified = True
+                fact_query_rewrite = False
 
             # 2. 逻辑流检查（仅在事实核查通过后）
             if not rewrite_needed and current_section.facts_verified:
@@ -1225,7 +1558,7 @@ class DualAgentReviewer:
                                 break
 
                             # 额外检测：问题类型重复
-                            current_issues = set(check_result.violations[0].get("type", "") for v in check_result.violations)
+                            current_issues = set(v.get("type", "") for v in check_result.violations)
                             history_issues = set(history_item.get("issues", []))
                             if current_issues == history_issues and len(current_issues) > 0:
                                 logger.warning("检测到问题模式循环（同样的问题反复出现），停止迭代")
@@ -1292,9 +1625,18 @@ class DualAgentReviewer:
 
                 # 根据原因选择重写方法
                 if rewrite_reason == "fact_correction":
-                    current_section = await self._rewrite_section(
-                        current_section, check_result.violations, chapter_context
-                    )
+                    claim_failures = self._extract_claim_failures(check_result.violations)
+                    if claim_failures:
+                        current_section = await self._rewrite_failed_claim_segments(
+                            current_section,
+                            claim_failures,
+                            chapter_context,
+                            compact_mode=fact_stagnated,
+                        )
+                    else:
+                        current_section = await self._rewrite_section(
+                            current_section, check_result.violations, chapter_context
+                        )
                 elif rewrite_reason == "logic_improvement":
                     current_section = await self._rewrite_for_logic(
                         current_section,
@@ -1313,6 +1655,14 @@ class DualAgentReviewer:
 
                 continue
 
+            if terminal_failure:
+                logger.warning(
+                    f"审查终止：存在未解决的严重事实问题，共迭代 {iteration + 1} 次"
+                )
+                if "[人工介入标记] 严重事实问题在自动重写后仍未解决" not in current_section.issues:
+                    current_section.issues.append("[人工介入标记] 严重事实问题在自动重写后仍未解决")
+                break
+
             # 所有检查通过，结束迭代
             logger.info(f"所有检查通过，共迭代 {iteration + 1} 次")
             break
@@ -1320,8 +1670,194 @@ class DualAgentReviewer:
         # 清理历史
         if section_id in self._rewrite_history:
             del self._rewrite_history[section_id]
+        if section_id in self._fact_stagnation_history:
+            del self._fact_stagnation_history[section_id]
+        self.checker_agent.set_fact_check_mode(query_rewrite=False)
 
         return current_section
+
+    def _extract_claim_failures(self, violations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """提取claim级失败项。"""
+        return [
+            v for v in violations
+            if v.get("check_scope") == "claim" and str(v.get("claim_id", "")).strip()
+        ]
+
+    def _detect_fact_stagnation(self, section_id: str, high_violations: List[Dict[str, Any]]) -> bool:
+        """停滞判定：连续两轮问题类型不变或平均置信度无提升。"""
+        issue_types = tuple(sorted({str(v.get("type", "")).strip() for v in high_violations if v.get("type")}))
+        claim_confidences: List[float] = []
+        for v in high_violations:
+            try:
+                claim_confidences.append(float(v.get("confidence", 0.0)))
+            except Exception:
+                continue
+
+        avg_conf = sum(claim_confidences) / len(claim_confidences) if claim_confidences else 0.0
+        history = self._fact_stagnation_history.setdefault(section_id, [])
+        history.append({"issue_types": issue_types, "avg_confidence": avg_conf})
+
+        if len(history) < 2:
+            return False
+
+        previous = history[-2]
+        current = history[-1]
+        same_issue_types = bool(current["issue_types"]) and current["issue_types"] == previous["issue_types"]
+        no_confidence_gain = current["avg_confidence"] <= previous["avg_confidence"] + 0.01
+        return same_issue_types or no_confidence_gain
+
+    async def _rewrite_failed_claim_segments(
+        self,
+        section: GeneratedSection,
+        claim_failures: List[Dict[str, Any]],
+        chapter_context: Dict[str, Any],
+        compact_mode: bool = False,
+    ) -> GeneratedSection:
+        """只重写失败claim对应句段，不重写整段。"""
+        updated_content = section.content
+        rewritten_count = 0
+
+        ordered_failures = sorted(
+            claim_failures,
+            key=lambda item: self._safe_float(item.get("confidence", 0.0)),
+        )
+
+        for failure in ordered_failures:
+            claim_text = str(failure.get("claim_text", "")).strip()
+            sentence_fragment = str(failure.get("sentence_fragment", "")).strip()
+            if not claim_text and not sentence_fragment:
+                continue
+
+            span = self._locate_claim_sentence_span(
+                updated_content,
+                sentence_fragment=sentence_fragment,
+                claim_text=claim_text,
+            )
+            if not span:
+                continue
+
+            start, end, original_sentence = span
+            revised_sentence = await self._rewrite_single_claim_sentence(
+                original_sentence=original_sentence,
+                claim_failure=failure,
+                compact_mode=compact_mode,
+            )
+            if not revised_sentence or revised_sentence == original_sentence:
+                continue
+
+            updated_content = updated_content[:start] + revised_sentence + updated_content[end:]
+            rewritten_count += 1
+
+        if rewritten_count == 0:
+            logger.warning("claim级重写未命中任何句段，保留原文并标记人工介入")
+            if "[人工介入标记] 无法自动定位失败claim句段" not in section.issues:
+                section.issues.append("[人工介入标记] 无法自动定位失败claim句段")
+            return section
+
+        section.content = updated_content
+        section.word_count = count_chinese_words(updated_content)
+        logger.info(f"claim级重写完成，已修复{rewritten_count}个失败claim句段，新字数: {section.word_count}")
+        return section
+
+    async def _rewrite_single_claim_sentence(
+        self,
+        original_sentence: str,
+        claim_failure: Dict[str, Any],
+        compact_mode: bool = False,
+    ) -> str:
+        """重写单个claim失败句段。"""
+        claim_id = str(claim_failure.get("claim_id", "")).strip()
+        claim_text = str(claim_failure.get("claim_text", "")).strip()
+        evidence_snippet = str(claim_failure.get("evidence_snippet", "")).strip()
+        failure_reason = str(claim_failure.get("failure_reason", "")).strip()
+        max_tokens = 180 if compact_mode else 280
+
+        prompt = f"""请只改写下面这一句，使其与证据一致。不要改动句子之外的任何文本。
+
+claim_id: {claim_id}
+失败原因: {failure_reason or "证据不足"}
+可用证据: {evidence_snippet or "证据不足"}
+原始claim: {claim_text}
+
+原句:
+{original_sentence}
+
+输出要求（必须JSON）:
+{{
+  "revised_sentence": "改写后的单句"
+}}
+"""
+        try:
+            response = await self.llm.complete(
+                [
+                    {"role": "system", "content": "你是精确修句编辑，只能改写单句，不得扩写段落。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=max_tokens,
+            )
+            payload = self._extract_json_object_loose(response)
+            revised = str(payload.get("revised_sentence", "")).strip()
+            if revised:
+                return revised
+            return original_sentence
+        except Exception as exc:
+            logger.warning(f"claim句段重写失败({claim_id}): {exc}")
+            return original_sentence
+
+    def _locate_claim_sentence_span(
+        self,
+        content: str,
+        sentence_fragment: str,
+        claim_text: str,
+    ) -> Optional[Tuple[int, int, str]]:
+        spans = list(re.finditer(r"[^。！？；\n]+[。！？；]?", content))
+        if not spans:
+            return None
+
+        if sentence_fragment:
+            for m in spans:
+                sent = m.group(0)
+                if sentence_fragment in sent:
+                    return m.start(), m.end(), sent
+
+        target = sentence_fragment or claim_text
+        best: Optional[Tuple[float, int, int, str]] = None
+        for m in spans:
+            sent = m.group(0).strip()
+            if not sent:
+                continue
+            score = difflib.SequenceMatcher(None, target[:160], sent[:160]).ratio()
+            if best is None or score > best[0]:
+                best = (score, m.start(), m.end(), m.group(0))
+
+        if best and best[0] >= 0.35:
+            return best[1], best[2], best[3]
+        return None
+
+    def _extract_json_object_loose(self, text: str) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
+
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
 
     async def _semantic_fingerprint(self, content: str) -> Dict:
         """生成语义指纹，用于检测车轱辘话循环
@@ -2074,32 +2610,40 @@ class ReviewOutputLayer:
 
         chapter.sections = reviewed_sections
 
-        # 跨章节一致性检查
-        if previous_chapter:
-            logger.info("进行跨章节一致性检查...")
-            cross_chapter_issues = await self.cross_chapter_checker.check_cross_chapter_consistency(
-                chapter, previous_chapter
-            )
-            if cross_chapter_issues:
-                logger.warning(f"发现 {len(cross_chapter_issues)} 个跨章节一致性问题")
-                # 将问题记录到第一章
-                if chapter.sections:
-                    for issue in cross_chapter_issues:
-                        chapter.sections[0].issues.append(
-                            f"[跨章节] {issue.get('type')}: {issue.get('description')}"
-                        )
+        verified_count = sum(1 for s in chapter.sections if s.facts_verified)
+        all_facts_verified = verified_count == len(chapter.sections) if chapter.sections else True
 
-            # 生成或优化过渡段落
-            if not chapter.transition_paragraph or chapter.transition_paragraph.startswith("（本章完"):
-                transition = await self.cross_chapter_checker.generate_chapter_transition(
-                    previous_chapter, chapter.outline
+        if all_facts_verified:
+            # 跨章节一致性检查
+            if previous_chapter:
+                logger.info("进行跨章节一致性检查...")
+                cross_chapter_issues = await self.cross_chapter_checker.check_cross_chapter_consistency(
+                    chapter, previous_chapter
                 )
-                if transition:
-                    chapter.transition_paragraph = transition
+                if cross_chapter_issues:
+                    logger.warning(f"发现 {len(cross_chapter_issues)} 个跨章节一致性问题")
+                    # 将问题记录到第一章
+                    if chapter.sections:
+                        for issue in cross_chapter_issues:
+                            chapter.sections[0].issues.append(
+                                f"[跨章节] {issue.get('type')}: {issue.get('description')}"
+                            )
 
-        # 六维并行审查
-        if self.enable_six_dimension_review and self.six_dimension_reviewer:
-            await self._run_six_dimension_review(chapter, chapter_context, previous_chapter)
+                # 生成或优化过渡段落
+                if not chapter.transition_paragraph or chapter.transition_paragraph.startswith("（本章完"):
+                    transition = await self.cross_chapter_checker.generate_chapter_transition(
+                        previous_chapter, chapter.outline
+                    )
+                    if transition:
+                        chapter.transition_paragraph = transition
+
+            # 六维并行审查
+            if self.enable_six_dimension_review and self.six_dimension_reviewer:
+                await self._run_six_dimension_review(chapter, chapter_context, previous_chapter)
+        else:
+            logger.warning(
+                "存在未通过事实核查的小节，跳过跨章节一致性检查与六维并行审查，建议人工复核后再继续后续章。"
+            )
 
         # 更新内部状态
         self._previous_chapter = chapter
@@ -2107,7 +2651,6 @@ class ReviewOutputLayer:
         self.cross_chapter_checker.update_from_chapter(chapter)
 
         # 统计
-        verified_count = sum(1 for s in chapter.sections if s.facts_verified)
         total_issues = sum(len(s.issues) for s in chapter.sections)
         logger.info(f"审查完成: {verified_count}/{len(chapter.sections)} 节通过事实核查，发现 {total_issues} 个问题")
 

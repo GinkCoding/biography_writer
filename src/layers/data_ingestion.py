@@ -1785,9 +1785,16 @@ class DataIngestionLayer:
             )
             materials = [r.material for r in results]
         else:
-            # 使用传统向量检索（向后兼容）
-            results = self.vector_store.search(query, n_results=n_results)
-            materials = [m for m, s in results]
+            # 使用纯向量检索（异步上下文避免调用同步 search）
+            vector_hits = self.vector_store.vector_search(query, top_k=n_results)
+            if vector_hits:
+                material_ids = [material_id for material_id, _ in vector_hits]
+                materials_map = self.vector_store._get_materials_by_ids(material_ids)
+                materials = [
+                    materials_map[material_id]
+                    for material_id, _ in vector_hits
+                    if material_id in materials_map
+                ]
 
         # 如果结果不足，补充时间检索
         if len(materials) < n_results and time_period and len(time_period) >= 4:

@@ -248,7 +248,7 @@ class ProgressiveContextAssembler:
         all_results = []
         for query in queries:
             if query.strip():
-                results = self.vector_store.search(query, n_results=8)
+                results = await self._search_materials_async(query, n_results=8)
                 all_results.extend(results)
 
         # 按相似度排序并去重
@@ -312,6 +312,47 @@ class ProgressiveContextAssembler:
         materials_text = "=== 相关素材（必须引用其中的具体细节）===\n" + "\n".join(material_texts) + coverage_hint
 
         return materials_text, coverage_info
+
+    async def _search_materials_async(
+        self,
+        query: str,
+        n_results: int = 8,
+    ) -> List[Tuple[InterviewMaterial, float]]:
+        """在异步上下文中安全检索素材，避免误用同步 `search`。"""
+        if not query.strip():
+            return []
+
+        # 优先使用异步混合检索
+        try:
+            hybrid_results = await self.vector_store.hybrid_search(
+                query=query,
+                n_results=n_results,
+                enable_rerank=False,  # 上下文检索优先低延迟
+            )
+            if hybrid_results:
+                converted: List[Tuple[InterviewMaterial, float]] = []
+                for item in hybrid_results:
+                    score = float(item.rrf_score or item.vector_score or item.bm25_score or item.rerank_score or 0.0)
+                    converted.append((item.material, score))
+                return converted
+        except Exception as exc:
+            logger.warning(f"异步混合检索失败，回退向量检索: {exc}")
+
+        # 回退到纯向量检索（同步CPU路径，不走 search() 以避免事件循环冲突）
+        try:
+            vector_hits = self.vector_store.vector_search(query, top_k=n_results)
+            if not vector_hits:
+                return []
+            material_ids = [material_id for material_id, _ in vector_hits]
+            materials_map = self.vector_store._get_materials_by_ids(material_ids)
+            return [
+                (materials_map[material_id], score)
+                for material_id, score in vector_hits
+                if material_id in materials_map
+            ]
+        except Exception as exc:
+            logger.warning(f"向量检索回退失败: {exc}")
+            return []
 
     def _select_materials_adaptive(
         self,
@@ -515,7 +556,7 @@ class ProgressiveContextAssembler:
 
         for char in characters[:5]:  # 限制人物数量
             # 搜索该人物的相关素材
-            results = self.vector_store.search(char, n_results=5)
+            results = await self._search_materials_async(char, n_results=5)
             events = []
             total_tokens = 0
 

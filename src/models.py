@@ -302,6 +302,7 @@ class GeneratedChapter(BaseModel):
     outline: ChapterOutline
     sections: List[GeneratedSection] = []
     transition_paragraph: Optional[str] = None  # 与下章的过渡段落
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     
     @property
     def full_content(self) -> str:
@@ -590,6 +591,6 @@ class FactCheckResult(BaseModel):
     """事实核查结果"""
     section_id: str
     is_consistent: bool
-    violations: List[Dict[str, str]] = []  # 违规项列表
+    violations: List[Dict[str, Any]] = []  # 违规项列表
     suggestions: List[str] = []
     confidence: float = Field(ge=0, le=1)

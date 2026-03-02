@@ -273,10 +273,11 @@ output/*.epub
         returncode, stdout, stderr = self._run_git(["commit", "-m", commit_msg])
         if returncode != 0:
             # 可能是没有变更需要提交
-            if "nothing to commit" in stderr.lower():
+            merged_output = f"{stdout}\n{stderr}".lower()
+            if "nothing to commit" in merged_output or "nothing added to commit" in merged_output:
                 logger.info("没有变更需要提交")
                 return True
-            logger.error(f"提交失败: {stderr}")
+            logger.error(f"提交失败: {stderr or stdout}")
             return False
 
         logger.info(f"章节 {chapter_num} 提交成功")
@@ -327,10 +328,11 @@ output/*.epub
         # 提交
         returncode, stdout, stderr = self._run_git(["commit", "-m", commit_msg])
         if returncode != 0:
-            if "nothing to commit" in stderr.lower():
+            merged_output = f"{stdout}\n{stderr}".lower()
+            if "nothing to commit" in merged_output or "nothing added to commit" in merged_output:
                 logger.info("没有变更需要提交")
                 return True
-            logger.error(f"提交失败: {stderr}")
+            logger.error(f"提交失败: {stderr or stdout}")
             return False
 
         logger.info("大纲更新提交成功")
