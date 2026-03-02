@@ -227,6 +227,9 @@ class LLMClient:
                     "max_tokens": max_tok,
                 },
             )
+            self._notify_progress(
+                f"LLM请求已发送 (attempt {attempt}/{self.max_attempts}, provider={self.provider}, model={self.model})"
+            )
             start_time = datetime.now()
 
             try:

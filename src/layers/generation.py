@@ -23,7 +23,7 @@ from src.models import (
     WritingStyle, InterviewMaterial
 )
 from src.layers.data_ingestion import VectorStore
-from src.utils import count_chinese_words, truncate_text, generate_id
+from src.utils import count_chinese_words, truncate_text, generate_id, sanitize_filename
 from src.context_assembler import (
     ProgressiveContextAssembler, ContextLevel, ContextLevelSelector,
     ContextPriority,
@@ -33,6 +33,7 @@ from src.prompt_manager import PromptManager, get_prompt_manager
 
 # 双Agent架构导入
 from src.agents import ContextAgent, ContextContract, DataAgent, ExtractionResult
+from src.observability.runtime_monitor import get_runtime_monitor
 
 
 # AI占位符检测模式
@@ -145,6 +146,7 @@ class ContentGenerationEngine:
         self.max_retries = 3
         # 初始化提示词管理器
         self.prompt_manager = prompt_manager or get_prompt_manager()
+        self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).resolve().parents[2])
     
     async def generate_section(
         self,
@@ -164,23 +166,22 @@ class ContentGenerationEngine:
             {"role": "user", "content": user_prompt}
         ]
         
-        # 调用LLM生成
-        logger.info(f"正在生成内容: {context.get('section_title', '小节')}...")
-        
-        content = await self.llm.complete(
-            messages,
-            temperature=0.7,
-            max_tokens=min(4000, target_words * 2)
+        section_title = context.get("section_title", "小节")
+        logger.info(f"正在生成内容: {section_title}...")
+        self.runtime_monitor.log_event(
+            stage="generation.section",
+            status="started",
+            message=f"开始生成小节: {section_title}",
+            metadata={"target_words": target_words},
         )
-        
-        # 后处理：清理和验证
-        content = self._post_process_content(content)
-        
-        # 检测占位符和模板化内容
-        placeholder_issues = self._detect_placeholders(content)
-        if placeholder_issues:
-            logger.warning(f"检测到占位符问题: {placeholder_issues}")
-        
+
+        content, placeholder_issues = await self._generate_with_quality_gate(
+            messages=messages,
+            context=context,
+            target_words=target_words,
+            section_title=section_title,
+        )
+
         actual_words = count_chinese_words(content)
         
         # 如果字数不足，进行扩写
@@ -191,6 +192,28 @@ class ContentGenerationEngine:
             )
             content = self._post_process_content(content)
             actual_words = count_chinese_words(content)
+
+        self.runtime_monitor.save_json_artifact(
+            name=f"section_{sanitize_filename(section_title)}.json",
+            data={
+                "section_title": section_title,
+                "target_words": target_words,
+                "actual_words": actual_words,
+                "placeholder_issues": placeholder_issues,
+                "content_preview": truncate_text(content, 800),
+            },
+            stage="04_generation",
+        )
+        self.runtime_monitor.log_event(
+            stage="generation.section",
+            status="completed",
+            message=f"小节生成完成: {section_title}",
+            metadata={
+                "target_words": target_words,
+                "actual_words": actual_words,
+                "issues": len(placeholder_issues),
+            },
+        )
         
         return GeneratedSection(
             id=generate_id("section_content"),
@@ -200,6 +223,96 @@ class ContentGenerationEngine:
             word_count=actual_words,
             generation_time=datetime.now()
         )
+
+    async def _generate_with_quality_gate(
+        self,
+        messages: List[Dict[str, str]],
+        context: Dict[str, str],
+        target_words: int,
+        section_title: str,
+    ) -> Tuple[str, List[str]]:
+        """质量门控生成：检测占位符/模板化内容并自动重写。"""
+        best_content = ""
+        best_issues: List[str] = []
+        best_issue_count = float("inf")
+
+        for attempt in range(1, self.max_retries + 1):
+            if attempt == 1:
+                candidate = await self.llm.complete(
+                    messages,
+                    temperature=0.7,
+                    max_tokens=min(4000, max(1200, target_words * 2)),
+                )
+            else:
+                candidate = await self._rewrite_problematic_content(
+                    original_content=best_content,
+                    issues=best_issues,
+                    context=context,
+                    target_words=target_words,
+                )
+
+            candidate = self._post_process_content(candidate)
+            issues = self._detect_placeholders(candidate)
+
+            self.runtime_monitor.log_event(
+                stage="generation.quality_gate",
+                status="running" if issues else "completed",
+                message=f"小节质量检测: {section_title} (attempt {attempt}/{self.max_retries})",
+                metadata={"issues": issues[:8], "issue_count": len(issues)},
+            )
+
+            if len(issues) < best_issue_count:
+                best_content = candidate
+                best_issues = issues
+                best_issue_count = len(issues)
+
+            if not issues:
+                return candidate, []
+
+            logger.warning(
+                f"小节[{section_title}] 检测到占位符/模板化问题(第{attempt}次): {issues[:4]}"
+            )
+
+        return best_content, best_issues
+
+    async def _rewrite_problematic_content(
+        self,
+        original_content: str,
+        issues: List[str],
+        context: Dict[str, str],
+        target_words: int,
+    ) -> str:
+        """对已生成但质量不达标的内容做定向重写。"""
+        issue_text = "\n".join(f"- {item}" for item in issues[:8]) if issues else "- 存在模板化表达"
+        rewrite_prompt = f"""请重写以下传记内容，彻底消除占位符和模板化表达，并保持事实不变。
+
+【检测到的问题】
+{issue_text}
+
+【原文】
+{original_content}
+
+【必须使用的素材】
+{context.get('materials', '')}
+
+【重写要求】
+1. 删除所有“待补充/待完善/此处需要展开”类占位符
+2. 删除套路化句式，改为素材驱动的具体叙述
+3. 明确时间、人物、地点线索，避免空泛结论
+4. 不得引入素材中不存在的新事实
+5. 目标长度约 {target_words} 字
+6. 直接输出正文，不要解释
+"""
+        messages = [
+            {"role": "system", "content": "你是一位严格的非虚构传记编辑，负责把模板化文本改为可验证细节文本。"},
+            {"role": "user", "content": rewrite_prompt},
+        ]
+        rewritten = await self.llm.complete(
+            messages,
+            temperature=0.45,
+            max_tokens=min(4000, max(1200, target_words * 2)),
+        )
+        return rewritten.strip()
     
     async def generate_section_stream(
         self,

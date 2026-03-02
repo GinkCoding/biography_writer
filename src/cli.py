@@ -4,6 +4,8 @@ import os
 import sys
 import asyncio
 import json
+import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -323,6 +325,8 @@ def status(
 def runtime_status(
     id: Optional[str] = typer.Option(None, "--id", help="项目ID（可选）"),
     tail: int = typer.Option(8, "--tail", help="显示最近N条事件"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="持续追踪运行事件"),
+    interval: float = typer.Option(2.0, "--interval", help="追踪轮询间隔（秒）"),
 ):
     """查看最新运行态监控信息（无需项目已完成初始化）"""
     monitor = get_runtime_monitor(project_root=project_root)
@@ -371,6 +375,166 @@ def runtime_status(
                 )
             console.print()
             console.print(table)
+
+    if not follow:
+        return
+
+    if not events_file:
+        console.print("[yellow]当前运行没有事件文件，无法 follow[/yellow]")
+        return
+
+    events_path = Path(events_file)
+    if not events_path.exists():
+        console.print(f"[yellow]事件文件不存在: {events_path}[/yellow]")
+        return
+
+    console.print(f"\n[cyan]进入追踪模式（轮询间隔 {interval:.1f}s，按 Ctrl+C 退出）[/cyan]")
+    last_sequence = 0
+
+    # 先读取一次已有事件，避免重复打印
+    try:
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        for line in lines:
+            try:
+                event = json.loads(line)
+                seq = int(event.get("sequence", 0) or 0)
+                last_sequence = max(last_sequence, seq)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    try:
+        while True:
+            latest = monitor.get_latest_status(book_id=id) or {}
+            latest_status = latest.get("status")
+            latest_events_file = latest.get("events_file") or str(events_path)
+            current_path = Path(latest_events_file)
+
+            if current_path.exists():
+                for line in current_path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    seq = int(event.get("sequence", 0) or 0)
+                    if seq <= last_sequence:
+                        continue
+                    last_sequence = seq
+                    console.print(
+                        f"[dim]{str(event.get('timestamp', ''))[:19]}[/dim] "
+                        f"[magenta]{event.get('stage', '')}[/magenta] "
+                        f"[yellow]{event.get('status', '')}[/yellow] "
+                        f"{event.get('message', '')}"
+                    )
+
+            if latest_status in {"completed", "failed"}:
+                console.print(f"[green]运行结束，状态: {latest_status}[/green]")
+                break
+            time.sleep(max(0.5, interval))
+    except KeyboardInterrupt:
+        console.print("[yellow]已停止追踪[/yellow]")
+
+
+@app.command(name="runtime-report")
+def runtime_report(
+    id: Optional[str] = typer.Option(None, "--id", help="项目ID（可选）"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="运行ID（可选，优先级高于 --id）"),
+):
+    """汇总运行事件与节点产物，输出结构化报告。"""
+    monitor = get_runtime_monitor(project_root=project_root)
+
+    if run_id:
+        status_path = project_root / ".observability" / "runs" / run_id / "status.json"
+        if not status_path.exists():
+            console.print(f"[red]未找到运行ID: {run_id}[/red]")
+            raise typer.Exit(1)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["status_file"] = str(status_path)
+    else:
+        status = monitor.get_latest_status(book_id=id)
+        if not status:
+            console.print("[yellow]没有找到运行记录[/yellow]")
+            raise typer.Exit(0)
+
+    events_file = Path(status.get("events_file", ""))
+    manifest_file = Path(status.get("manifest_file", ""))
+    run_dir = Path(status.get("run_dir", ""))
+
+    stage_counter = defaultdict(int)
+    status_counter = defaultdict(int)
+    latest_stage_message = {}
+
+    if events_file.exists():
+        for line in events_file.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            stage = str(event.get("stage", "unknown"))
+            event_status = str(event.get("status", "unknown"))
+            stage_counter[stage] += 1
+            status_counter[event_status] += 1
+            latest_stage_message[stage] = event.get("message", "")
+
+    artifacts = []
+    if manifest_file.exists():
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            artifacts = manifest.get("artifacts", [])
+        except Exception:
+            artifacts = []
+
+    console.print(
+        Panel(
+            f"[bold]运行ID:[/bold] {status.get('run_id', 'N/A')}\n"
+            f"[bold]项目ID:[/bold] {status.get('book_id', 'N/A')}\n"
+            f"[bold]状态:[/bold] {status.get('status', 'N/A')}\n"
+            f"[bold]事件总数:[/bold] {status.get('event_count', 0)}\n"
+            f"[bold]产物总数:[/bold] {len(artifacts)}",
+            title="运行报告",
+            box=box.ROUNDED,
+        )
+    )
+
+    if stage_counter:
+        table = Table(show_header=True, header_style="bold cyan", box=box.SIMPLE)
+        table.add_column("阶段", style="magenta")
+        table.add_column("事件数", justify="right", style="yellow")
+        table.add_column("最新消息", style="white")
+        for stage, count in sorted(stage_counter.items(), key=lambda x: x[0]):
+            table.add_row(stage, str(count), str(latest_stage_message.get(stage, "")))
+        console.print("\n[bold]阶段统计[/bold]")
+        console.print(table)
+
+    if artifacts:
+        artifact_table = Table(show_header=True, header_style="bold green", box=box.SIMPLE)
+        artifact_table.add_column("阶段", style="cyan")
+        artifact_table.add_column("文件", style="white")
+        artifact_table.add_column("大小(bytes)", justify="right", style="yellow")
+        for artifact in artifacts[-15:]:
+            artifact_table.add_row(
+                str(artifact.get("stage", "")),
+                str(artifact.get("name", "")),
+                str(artifact.get("size_bytes", 0)),
+            )
+        console.print("\n[bold]最近节点产物（最多15条）[/bold]")
+        console.print(artifact_table)
+
+    report_path = run_dir / "runtime_report.json" if run_dir else None
+    if report_path:
+        payload = {
+            "run_id": status.get("run_id"),
+            "book_id": status.get("book_id"),
+            "status": status.get("status"),
+            "stage_counter": dict(stage_counter),
+            "status_counter": dict(status_counter),
+            "latest_stage_message": latest_stage_message,
+            "artifact_count": len(artifacts),
+            "artifacts": artifacts,
+        }
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        console.print(f"\n[dim]报告已写入: {report_path}[/dim]")
 
 
 @app.command()
@@ -722,6 +886,7 @@ def main():
             "  [green]styles[/green]      - 查看可用风格\n"
             "  [green]status[/green]      - 查看项目状态\n"
             "  [green]runtime-status[/green] - 查看运行态监控\n"
+            "  [green]runtime-report[/green] - 汇总运行事件与节点产物\n"
             "  [green]git-status[/green] - 查看Git版本状态\n"
             "  [green]git-log[/green]    - 查看提交历史\n"
             "  [green]rollback[/green]   - 回滚到指定章节\n"

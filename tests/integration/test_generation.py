@@ -210,6 +210,5 @@ class TestGenerationQuality:
 
 # 标记集成测试
 pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.asyncio
+    pytest.mark.integration
 ]

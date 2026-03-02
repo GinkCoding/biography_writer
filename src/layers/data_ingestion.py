@@ -14,8 +14,15 @@ from loguru import logger
 
 from src.config import settings
 from src.models import InterviewMaterial
-from src.utils import extract_time_expressions, extract_entities, generate_id
+from src.utils import (
+    extract_time_expressions,
+    extract_entities,
+    extract_key_information,
+    generate_id,
+    truncate_text,
+)
 from src.embedding import get_embedding_manager
+from src.observability.runtime_monitor import get_runtime_monitor
 
 # 导入新的三层存储架构
 from src.storage.vector_manager import VectorManager, VectorEntry
@@ -588,6 +595,7 @@ class VectorStore:
         self.bm25_index = BM25Index(self.db_path)
         self.rrf = RRFusion(k=settings.hybrid_retrieval.rrf_k)
         self.reranker = Reranker()
+        self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).resolve().parents[2])
 
         self._init_db()
     
@@ -724,20 +732,32 @@ class VectorStore:
     ):
         """向后兼容：使用旧的存储方式"""
         logger.info(f"正在为 {len(materials)} 个素材生成向量嵌入...")
+        self.runtime_monitor.log_event(
+            stage="data_ingestion.embedding",
+            status="started",
+            message=f"开始生成向量嵌入: {len(materials)}个素材",
+            metadata={"chunk_type": chunk_type, "parent_id": parent_id},
+        )
 
         # 分批生成嵌入（每批 5 个，避免 API 限制）
         import numpy as np
         BATCH_SIZE = 5
         embeddings_list = []
         contents = [m.content for m in materials]
-        
-        logger.info(f"分 {len(contents) // BATCH_SIZE + 1} 批生成向量嵌入...")
-        
+
+        total_batches = max(1, math.ceil(len(contents) / BATCH_SIZE))
+        logger.info(f"分 {total_batches} 批生成向量嵌入...")
+
         for i in range(0, len(contents), BATCH_SIZE):
             batch_contents = contents[i:i + BATCH_SIZE]
             batch_num = i // BATCH_SIZE + 1
             logger.debug(f"  第 {batch_num} 批：{len(batch_contents)} 个文本")
-            
+            self.runtime_monitor.heartbeat(
+                stage="data_ingestion.embedding",
+                message=f"向量嵌入进行中: 第{batch_num}/{total_batches}批",
+                metadata={"batch": batch_num, "total_batches": total_batches},
+            )
+
             try:
                 batch_embeddings = np.asarray(
                     self.embedding_mgr.encode(batch_contents),
@@ -748,6 +768,12 @@ class VectorStore:
                 logger.error(f"第 {batch_num} 批生成失败：{e}")
                 zero_embeddings = np.zeros((len(batch_contents), 768), dtype=np.float32)
                 embeddings_list.append(zero_embeddings)
+                self.runtime_monitor.log_event(
+                    stage="data_ingestion.embedding",
+                    status="warning",
+                    message=f"第{batch_num}批向量生成失败，已回退零向量",
+                    metadata={"error": str(e)},
+                )
         
         # 合并所有批次
         embeddings = np.vstack(embeddings_list) if embeddings_list else None
@@ -808,6 +834,12 @@ class VectorStore:
 
         if added_count > 0:
             logger.info(f"已向数据库添加 {added_count} 个素材块（含向量嵌入和BM25索引）")
+        self.runtime_monitor.log_event(
+            stage="data_ingestion.embedding",
+            status="completed",
+            message=f"向量嵌入存储完成: 新增{added_count}个素材",
+            metadata={"total_input": len(materials), "added_count": added_count},
+        )
     
     def vector_search(
         self,
@@ -1393,6 +1425,86 @@ class DataIngestionLayer:
         self.segmenter = TopicSegmenter()
         self.vector_store = VectorStore()
         self.retriever = HybridRetriever(self.vector_store)
+        self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).resolve().parents[2])
+
+    def _log_runtime(
+        self,
+        stage: str,
+        status: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """写入运行态事件（无 active run 时自动静默）。"""
+        self.runtime_monitor.log_event(
+            stage=stage,
+            status=status,
+            message=message,
+            metadata=metadata or {},
+        )
+
+    @staticmethod
+    def _safe_unique(items: List[str], max_items: int = 20) -> List[str]:
+        seen = set()
+        result: List[str] = []
+        for item in items:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+            if len(result) >= max_items:
+                break
+        return result
+
+    def _extract_chunk_metadata(
+        self,
+        chunk_text: str,
+        fallback_topics: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """提取单块素材的结构化元数据（失败降级，不抛错）。"""
+        warnings: List[str] = []
+        key_info: Dict[str, Any] = {}
+
+        try:
+            key_info = extract_key_information(chunk_text)
+            warnings.extend(key_info.get("warnings", []))
+        except Exception as exc:
+            warnings.append(f"key_information_failed: {exc}")
+            key_info = {}
+
+        # 时间引用降级策略
+        time_refs = [item.get("text", "") for item in key_info.get("time_expressions", []) if item.get("text")]
+        if not time_refs:
+            try:
+                time_refs = [item.get("text", "") for item in extract_time_expressions(chunk_text) if item.get("text")]
+            except Exception as exc:
+                warnings.append(f"time_extraction_failed: {exc}")
+                time_refs = []
+
+        # 实体降级策略
+        entities = [item.get("text", "") for item in key_info.get("entities", []) if item.get("text")]
+        if not entities:
+            try:
+                entities = [item.get("text", "") for item in extract_entities(chunk_text) if item.get("text")]
+            except Exception as exc:
+                warnings.append(f"entity_extraction_failed: {exc}")
+                entities = []
+
+        topics = list(fallback_topics or [])
+        if not topics:
+            try:
+                topics = self.segmenter._extract_topics(chunk_text)
+            except Exception as exc:
+                warnings.append(f"topic_extraction_failed: {exc}")
+                topics = []
+
+        return {
+            "time_references": self._safe_unique(time_refs, max_items=20),
+            "entities": self._safe_unique(entities, max_items=25),
+            "topics": self._safe_unique(topics, max_items=10),
+            "warnings": self._safe_unique(warnings, max_items=12),
+            "key_information": key_info,
+        }
     
     async def process_interview(
         self,
@@ -1403,57 +1515,213 @@ class DataIngestionLayer:
         处理单个采访文件
         """
         logger.info(f"开始处理采访文件: {file_path}")
-        
+        self._log_runtime(
+            stage="data_ingestion",
+            status="started",
+            message=f"开始处理采访文件: {file_path.name}",
+            metadata={"file_path": str(file_path), "subject_hint": subject_hint},
+        )
+
         # 1. 读取文件
+        self._log_runtime("data_ingestion.read", "started", "读取采访文件")
         text = self._read_file(file_path)
-        
+        self._log_runtime(
+            "data_ingestion.read",
+            "completed",
+            "读取采访文件完成",
+            {"text_length": len(text)},
+        )
+
         # 2. 数据清洗
         logger.info("正在清洗数据...")
+        self._log_runtime("data_ingestion.clean", "started", "清洗采访文本")
         cleaned = self.cleaner.clean(text)
         logger.info(f"清洗完成，移除噪音词 {len(cleaned.removed_noise)} 个")
-        
+        self._log_runtime(
+            "data_ingestion.clean",
+            "completed",
+            "清洗完成",
+            {
+                "cleaned_length": len(cleaned.cleaned),
+                "noise_removed_count": len(cleaned.removed_noise),
+            },
+        )
+        self.runtime_monitor.save_json_artifact(
+            name="cleaning_summary.json",
+            data={
+                "source_file": file_path.name,
+                "original_length": len(text),
+                "cleaned_length": len(cleaned.cleaned),
+                "removed_noise": cleaned.removed_noise[:20],
+                "cleaned_preview": truncate_text(cleaned.cleaned, 800),
+            },
+            stage="01_data_ingestion",
+        )
+
         # 3. 话题切分
         logger.info("正在切分话题...")
+        self._log_runtime("data_ingestion.segment", "started", "切分话题段落")
         segments = self.segmenter.segment(cleaned.cleaned)
+        if not segments:
+            segments = [
+                {
+                    "text": cleaned.cleaned,
+                    "topics": self.segmenter._extract_topics(cleaned.cleaned),
+                    "char_count": len(cleaned.cleaned),
+                    "time_period": "",
+                }
+            ]
         logger.info(f"切分为 {len(segments)} 个话题段落")
-        
-        # 4. 进一步切分为检索块（使用传记专用切分，增大到1000字）
+        self._log_runtime(
+            "data_ingestion.segment",
+            "completed",
+            f"话题切分完成: {len(segments)}段",
+            {"segments_count": len(segments)},
+        )
+
+        # 4. 进一步切分为检索块并提取元数据（容错）
         logger.info("正在生成检索块...")
-        materials = []
+        self._log_runtime("data_ingestion.extract", "started", "切分检索块并提取关键信息")
+        materials: List[InterviewMaterial] = []
         chunk_idx = 0
-        
+        extraction_diagnostics: List[Dict[str, Any]] = []
+
         for seg_idx, segment in enumerate(segments):
-            # 将话题段落进一步切分（传记专用策略，增大chunk_size）
-            chunks = split_text_biography(
-                segment["text"],
-                chunk_size=1000,  # 增大到1000字
-                chunk_overlap=200  # 增大重叠
-            )
-            
-            for chunk_text in chunks:
-                # 提取元数据
-                time_refs = extract_time_expressions(chunk_text)
-                entities = extract_entities(chunk_text)
-                
+            segment_text = str(segment.get("text", "")).strip()
+            if not segment_text:
+                continue
+
+            try:
+                chunks = split_text_biography(
+                    segment_text,
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                )
+            except Exception as exc:
+                chunks = [segment_text]
+                extraction_diagnostics.append(
+                    {
+                        "segment_index": seg_idx,
+                        "warning": f"chunk_split_failed: {exc}",
+                    }
+                )
+
+            if not chunks:
+                chunks = [segment_text]
+
+            for local_idx, chunk_text in enumerate(chunks):
+                content = str(chunk_text).strip()
+                if not content:
+                    continue
+
+                metadata = self._extract_chunk_metadata(
+                    content,
+                    fallback_topics=segment.get("topics", []),
+                )
+                if metadata.get("warnings"):
+                    extraction_diagnostics.append(
+                        {
+                            "segment_index": seg_idx,
+                            "chunk_local_index": local_idx,
+                            "chunk_index": chunk_idx,
+                            "warnings": metadata["warnings"],
+                            "preview": truncate_text(content, 160),
+                        }
+                    )
+
                 material = InterviewMaterial(
                     id=generate_id(file_path.name, chunk_idx),
                     source_file=file_path.name,
-                    content=chunk_text,
+                    content=content,
                     chunk_index=chunk_idx,
-                    topics=segment["topics"],
-                    time_references=[t["text"] for t in time_refs],
-                    entities=[e["text"] for e in entities]
+                    topics=metadata.get("topics", []),
+                    time_references=metadata.get("time_references", []),
+                    entities=metadata.get("entities", []),
                 )
-                
                 materials.append(material)
                 chunk_idx += 1
-        
+
+            self._log_runtime(
+                "data_ingestion.extract",
+                "heartbeat",
+                f"素材抽取进行中: 段落{seg_idx + 1}/{len(segments)}",
+                {"current_chunk_count": len(materials)},
+            )
+
+        # 至少保留一个检索块，避免脏输入导致全链路中断
+        if not materials and cleaned.cleaned.strip():
+            fallback_text = cleaned.cleaned.strip()
+            fallback_metadata = self._extract_chunk_metadata(fallback_text, fallback_topics=[])
+            materials.append(
+                InterviewMaterial(
+                    id=generate_id(file_path.name, "fallback"),
+                    source_file=file_path.name,
+                    content=fallback_text,
+                    chunk_index=0,
+                    topics=fallback_metadata.get("topics", []),
+                    time_references=fallback_metadata.get("time_references", []),
+                    entities=fallback_metadata.get("entities", []),
+                )
+            )
+            extraction_diagnostics.append(
+                {
+                    "segment_index": -1,
+                    "chunk_local_index": -1,
+                    "chunk_index": 0,
+                    "warnings": ["fallback_single_chunk_enabled"],
+                    "preview": truncate_text(fallback_text, 160),
+                }
+            )
+
         logger.info(f"生成 {len(materials)} 个检索块")
-        
+        self._log_runtime(
+            "data_ingestion.extract",
+            "completed",
+            f"检索块生成完成: {len(materials)}个",
+            {
+                "materials_count": len(materials),
+                "warning_chunks": len(extraction_diagnostics),
+            },
+        )
+
+        self.runtime_monitor.save_json_artifact(
+            name="extraction_summary.json",
+            data={
+                "source_file": file_path.name,
+                "segments_count": len(segments),
+                "materials_count": len(materials),
+                "warning_chunks": len(extraction_diagnostics),
+                "diagnostics": extraction_diagnostics[:200],
+            },
+            stage="01_data_ingestion",
+        )
+
         # 5. 存入数据库（含向量嵌入）
         logger.info("正在存入数据库并生成向量嵌入...")
-        self.vector_store.add_materials(materials)
-        
+        self._log_runtime("data_ingestion.store", "started", "写入检索数据库")
+        try:
+            self.vector_store.add_materials(materials)
+            self._log_runtime(
+                "data_ingestion.store",
+                "completed",
+                "检索数据库写入完成",
+                {"materials_count": len(materials)},
+            )
+        except Exception as exc:
+            logger.warning(f"数据库写入失败，保留内存结果继续流程: {exc}")
+            self._log_runtime(
+                "data_ingestion.store",
+                "warning",
+                "数据库写入失败，已降级继续",
+                {"error": str(exc), "materials_count": len(materials)},
+            )
+
+        self._log_runtime(
+            stage="data_ingestion",
+            status="completed",
+            message=f"采访处理完成: {len(materials)}个素材块",
+            metadata={"source_file": file_path.name},
+        )
         return materials
     
     def _read_file(self, file_path: Path) -> str:

@@ -263,19 +263,24 @@ class ProgressiveContextAssembler:
 
         # 根据预算限制数量
         max_materials = min(10, budget // 400)
-        unique_materials = unique_materials[:max_materials]
+        selected_materials, adaptive_threshold = self._select_materials_adaptive(
+            unique_materials=unique_materials,
+            max_materials=max(3, max_materials),
+            min_materials=4,
+        )
 
         # 计算素材覆盖率
-        high_confidence = len([s for m, s in unique_materials if s > 0.7])
-        medium_confidence = len([s for m, s in unique_materials if 0.5 <= s <= 0.7])
+        high_confidence = len([s for m, s in selected_materials if s > 0.7])
+        medium_confidence = len([s for m, s in selected_materials if 0.5 <= s <= 0.7])
         coverage_info = {
-            "total_materials": len(unique_materials),
+            "total_materials": len(selected_materials),
             "high_confidence": high_confidence,
             "medium_confidence": medium_confidence,
-            "coverage_ratio": min(len(unique_materials) / 5, 1.0),
+            "coverage_ratio": min(len(selected_materials) / 5, 1.0),
+            "adaptive_threshold": round(adaptive_threshold, 3),
         }
 
-        if not unique_materials:
+        if not selected_materials:
             coverage_info["status"] = "严重不足"
             return """=== 相关素材 ===
 【⚠️ 严重警告】当前小节缺乏直接对应的采访素材。请基于已有章节上下文和时代背景进行合理推演，但必须：
@@ -293,7 +298,7 @@ class ProgressiveContextAssembler:
             coverage_info["status"] = "充足"
 
         material_texts = []
-        for i, (m, score) in enumerate(unique_materials, 1):
+        for i, (m, score) in enumerate(selected_materials, 1):
             content = truncate_text(m.content, 400)
             material_texts.append(
                 f"[素材{i}] 来源: {m.source_file} (相关度: {score:.2f})\n"
@@ -301,12 +306,37 @@ class ProgressiveContextAssembler:
             )
 
         coverage_hint = f"""
-【素材覆盖率】{coverage_info['status']}（共{len(unique_materials)}条素材，高相关度{high_confidence}条）
+【素材覆盖率】{coverage_info['status']}（共{len(selected_materials)}条素材，高相关度{high_confidence}条，阈值{adaptive_threshold:.2f}）
 """
 
         materials_text = "=== 相关素材（必须引用其中的具体细节）===\n" + "\n".join(material_texts) + coverage_hint
 
         return materials_text, coverage_info
+
+    def _select_materials_adaptive(
+        self,
+        unique_materials: List[Tuple[InterviewMaterial, float]],
+        max_materials: int,
+        min_materials: int = 4,
+    ) -> Tuple[List[Tuple[InterviewMaterial, float]], float]:
+        """按检索得分分布自适应筛选素材，保证最低召回量。"""
+        if not unique_materials:
+            return [], 0.0
+
+        ordered = sorted(unique_materials, key=lambda x: x[1], reverse=True)
+        if len(ordered) <= max_materials:
+            return ordered, 0.0
+
+        top_score = ordered[0][1]
+        boundary_score = ordered[min(len(ordered) - 1, max_materials - 1)][1]
+        adaptive_threshold = max(0.32, min(0.78, top_score * 0.55 + boundary_score * 0.45))
+
+        selected = [item for item in ordered if item[1] >= adaptive_threshold][:max_materials]
+        if len(selected) < min_materials:
+            selected = ordered[: min(len(ordered), max(max_materials, min_materials))]
+            selected = selected[:max_materials]
+
+        return selected, adaptive_threshold
 
     def _build_continuity_context(
         self,

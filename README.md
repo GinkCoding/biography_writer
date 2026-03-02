@@ -56,6 +56,12 @@ python -m biography status --id <项目ID>
 
 # 不依赖outline，直接查看最近一次运行态（适合init阶段排障）
 python -m biography runtime-status --id <项目ID> --tail 10
+
+# 持续追踪运行事件（观察是否“卡住”）
+python -m biography runtime-status --id <项目ID> --follow --interval 2
+
+# 汇总本次运行的事件与节点产物，并输出 runtime_report.json
+python -m biography runtime-report --id <项目ID>
 ```
 
 ## 可用写作风格
@@ -130,6 +136,7 @@ output/<书名>_<日期>/
 ## 技术特点
 
 - **RAG检索增强**：基于向量数据库检索相关素材，防止幻觉
+- **容错式关键信息提取**：采访稿提取失败自动降级，不因脏文本直接中断
 - **滑动窗口记忆**：只携带必要上下文，避免灾难性遗忘
 - **双重Agent审校**：生成Agent与审查Agent博弈，保证事实准确
 - **时代背景增强**：自动融入对应年代的社会风貌细节

@@ -5,6 +5,12 @@ from typing import Optional, Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _default_project_path(name: str) -> str:
+    return str(PROJECT_ROOT / name)
+
 
 class ModelConfig(BaseSettings):
     """模型配置"""
@@ -30,10 +36,18 @@ class GenerationConfig(BaseSettings):
 
 class PathConfig(BaseSettings):
     """路径配置"""
-    interview_dir: str = "/Users/guoquan/work/Kimi/biography_writer/interviews"
-    output_dir: str = "/Users/guoquan/work/Kimi/biography_writer/output"
-    vector_db_dir: str = "/Users/guoquan/work/Kimi/biography_writer/.vector_db"
-    cache_dir: str = "/Users/guoquan/work/Kimi/biography_writer/.cache"
+    interview_dir: str = Field(
+        default_factory=lambda: os.getenv("BIOGRAPHY_INTERVIEW_DIR", _default_project_path("interviews"))
+    )
+    output_dir: str = Field(
+        default_factory=lambda: os.getenv("BIOGRAPHY_OUTPUT_DIR", _default_project_path("output"))
+    )
+    vector_db_dir: str = Field(
+        default_factory=lambda: os.getenv("BIOGRAPHY_VECTOR_DB_DIR", _default_project_path(".vector_db"))
+    )
+    cache_dir: str = Field(
+        default_factory=lambda: os.getenv("BIOGRAPHY_CACHE_DIR", _default_project_path(".cache"))
+    )
 
 
 class EmbeddingConfig(BaseSettings):
