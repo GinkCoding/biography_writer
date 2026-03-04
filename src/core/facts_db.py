@@ -12,14 +12,44 @@ from datetime import datetime
 
 @dataclass
 class Person:
-    """人物信息"""
+    """
+    人物信息
+
+    关系是动态的，通过clues（线索）记录每次互动，
+    由LLM综合判断当前关系状态，而非硬编码状态机
+    """
     name: str
-    relationship: str  # 与传主关系
+    relationship: str  # 与传主关系（初始关系，如"父亲"、"朋友"）
     first_appearance: int  # 首次出场章节
     description: str = ""  # 人物描述
-    status: str = "active"  # 状态: active(活跃), deceased(已故), departed(离开/断绝关系)
-    status_chapter: Optional[int] = None  # 状态变更章节
-    status_description: str = ""  # 状态变更说明（如"因车祸去世"、"断绝父子关系"）
+
+    # 动态线索记录（取代硬编码status）
+    relationship_clues: List[Dict] = field(default_factory=list)
+    # 每个clue: {chapter, type, description, context}
+    # type可以是任何描述性词语："去世"、"决裂"、"大吵"、"和解"、"疏远"等
+
+    # 物理状态（客观事实）
+    physical_status: str = "alive"  # alive, deceased（仅记录是否在世，不涉关系）
+    death_chapter: Optional[int] = None
+
+    def add_clue(self, chapter: int, clue_type: str, description: str, context: str = ""):
+        """添加关系线索"""
+        self.relationship_clues.append({
+            "chapter": chapter,
+            "type": clue_type,
+            "description": description,
+            "context": context
+        })
+
+    def get_clues_after(self, chapter: int) -> List[Dict]:
+        """获取某章之后的所有线索"""
+        return [c for c in self.relationship_clues if c["chapter"] >= chapter]
+
+    def get_latest_clue(self) -> Optional[Dict]:
+        """获取最新线索"""
+        if not self.relationship_clues:
+            return None
+        return max(self.relationship_clues, key=lambda x: x["chapter"])
 
 
 @dataclass
@@ -140,88 +170,81 @@ class FactsDatabase:
             )
             self.save()
 
-    def update_person_status(self, name: str, status: str, chapter: int, description: str = ""):
+    def add_relationship_clue(self, name: str, chapter: int, clue_type: str, description: str, context: str = ""):
         """
-        更新人物状态
+        添加关系线索（取代硬编码状态更新）
 
         Args:
             name: 人物姓名
-            status: 新状态 (active/deceased/departed)
+            chapter: 线索所在章节
+            clue_type: 线索类型（可以是任意描述："去世"、"大吵"、"和解"、"疏远"等）
+            description: 具体描述
+            context: 上下文片段
+        """
+        if name in self.persons:
+            self.persons[name].add_clue(chapter, clue_type, description, context)
+            self.save()
+
+    def update_physical_status(self, name: str, status: str, chapter: int):
+        """
+        更新人物物理状态（客观事实）
+
+        Args:
+            name: 人物姓名
+            status: "alive" 或 "deceased"
             chapter: 状态变更章节
-            description: 状态变更说明
         """
         if name in self.persons:
             person = self.persons[name]
-            person.status = status
-            person.status_chapter = chapter
-            person.status_description = description
+            person.physical_status = status
+            if status == "deceased":
+                person.death_chapter = chapter
             self.save()
 
     def check_person_usage(self, name: str, chapter: int) -> Dict:
         """
-        检查某章节中人物的使用方式是否恰当
+        获取人物在指定章节的使用上下文（供LLM判断）
 
-        去世/离开人物可以：回忆、追思、提及生前事迹
-        去世/离开人物不能：实际互动（说话、动作、在场）
+        不再硬编码规则，而是提供完整线索让LLM理解关系动态
 
         Returns:
             {
-                "can_interact": bool,      # 是否可以直接互动（说话、动作）
-                "can_remember": bool,      # 是否可以回忆、提及
-                "status": str,             # 人物当前状态
-                "restriction": str,        # 如有限制，说明具体限制
-                "guidance": str            # 给LLM的指导建议
+                "physical_status": str,     # alive / deceased（客观事实）
+                "death_chapter": int,       # 如去世，记录章节
+                "clues_before": list,       # 本章之前的所有关系线索
+                "clues_after": list,        # 本章及之后的线索（用于判断本章状态）
+                "latest_clue": dict,        # 最新线索
+                "relationship_history": str # 格式化的关系历史摘要
             }
         """
         if name not in self.persons:
             return {
-                "can_interact": True,
-                "can_remember": True,
-                "status": "new",
-                "restriction": "",
-                "guidance": ""
+                "physical_status": "unknown",
+                "death_chapter": None,
+                "clues_before": [],
+                "clues_after": [],
+                "latest_clue": None,
+                "relationship_history": "新人物，无历史记录"
             }
 
         person = self.persons[name]
 
-        # 活跃人物：可以互动也可以回忆
-        if person.status == "active":
-            return {
-                "can_interact": True,
-                "can_remember": True,
-                "status": "active",
-                "restriction": "",
-                "guidance": ""
-            }
+        clues_before = [c for c in person.relationship_clues if c["chapter"] < chapter]
+        clues_after = [c for c in person.relationship_clues if c["chapter"] >= chapter]
+        latest = person.get_latest_clue()
 
-        # 检查状态变更章节
-        if person.status_chapter and chapter >= person.status_chapter:
-            # 在第X章或之后，人物已去世/离开
-            if person.status == "deceased":
-                return {
-                    "can_interact": False,
-                    "can_remember": True,
-                    "status": "deceased",
-                    "restriction": f"已于第{person.status_chapter}章去世",
-                    "guidance": f"'{name}'已去世，可以写'想起{name}'、'怀念{name}'、'回忆起{name}生前'，"
-                               f"但不能写'{name}说'、'{name}看着他'、'{name}在场'等直接互动"
-                }
-            elif person.status == "departed":
-                return {
-                    "can_interact": False,
-                    "can_remember": True,
-                    "status": "departed",
-                    "restriction": f"已于第{person.status_chapter}章离开",
-                    "guidance": f"'{name}'已离开，可以提及往事，但不能再写{name}与传主直接互动"
-                }
+        # 构建关系历史文本
+        history_lines = []
+        for clue in sorted(person.relationship_clues, key=lambda x: x["chapter"]):
+            history_lines.append(f"第{clue['chapter']}章: {clue['type']} - {clue['description']}")
 
-        # 状态变更前，人物仍是活跃的
         return {
-            "can_interact": True,
-            "can_remember": True,
-            "status": person.status,
-            "restriction": "",
-            "guidance": ""
+            "physical_status": person.physical_status,
+            "death_chapter": person.death_chapter,
+            "clues_before": clues_before,
+            "clues_after": clues_after,
+            "latest_clue": latest,
+            "relationship_history": "\n".join(history_lines) if history_lines else "无显著关系变化记录"
         }
 
     def add_event(self, name: str, year: Optional[int], location: str, chapter: int,

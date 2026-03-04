@@ -238,9 +238,9 @@ async def test_vector_store():
 
 
 async def test_person_status_tracking():
-    """测试人物状态追踪（去世/离开后不应再互动，但可以回忆）"""
+    """测试人物关系线索追踪（新的灵活系统）"""
     print("\n" + "="*60)
-    print("测试5: 人物状态追踪")
+    print("测试5: 人物关系线索追踪")
     print("="*60)
 
     db_path = Path("test_output/test_person_status.json")
@@ -253,52 +253,53 @@ async def test_person_status_tracking():
     db.add_person("父亲", "父亲", chapter=1, description="传主的父亲")
     db.add_person("母亲", "母亲", chapter=1, description="传主的母亲")
 
-    # 初始状态都应该是 active
-    assert db.persons["父亲"].status == "active"
-    print(f"✓ 父亲初始状态: {db.persons['父亲'].status}")
+    # 初始物理状态应该是 alive
+    assert db.persons["父亲"].physical_status == "alive"
+    print(f"✓ 父亲初始物理状态: {db.persons['父亲'].physical_status}")
 
-    # 更新父亲状态为去世（第1章）
-    db.update_person_status("父亲", "deceased", chapter=1, description="因车祸去世")
+    # 添加关系线索（取代硬编码状态更新）
+    db.add_relationship_clue("父亲", chapter=1, clue_type="death", description="因车祸去世", context="父亲在上班途中遭遇车祸")
+    db.update_physical_status("父亲", "deceased", chapter=1)
 
-    # 检查状态
-    assert db.persons["父亲"].status == "deceased"
-    assert db.persons["父亲"].status_chapter == 1
-    print(f"✓ 父亲状态更新: deceased (第1章)")
+    # 检查线索被记录
+    assert len(db.persons["父亲"].relationship_clues) == 1
+    assert db.persons["父亲"].physical_status == "deceased"
+    assert db.persons["父亲"].death_chapter == 1
+    print(f"✓ 父亲关系线索: {db.persons['父亲'].relationship_clues}")
 
-    # 使用新的 check_person_usage 方法
+    # 使用新的 check_person_usage 方法（返回线索供LLM分析）
     usage_ch2 = db.check_person_usage("父亲", chapter=2)
-    print(f"✓ 第2章父亲使用方式: {usage_ch2}")
+    print(f"✓ 第2章父亲使用上下文: {usage_ch2}")
 
-    # 去世后：不能互动，但可以回忆
-    assert not usage_ch2["can_interact"], "去世后不应能互动"
-    assert usage_ch2["can_remember"], "去世后应该可以回忆"
-    assert usage_ch2["status"] == "deceased"
-    assert "去世" in usage_ch2["restriction"]
+    # 验证返回结构
+    assert usage_ch2["physical_status"] == "deceased"
+    assert usage_ch2["death_chapter"] == 1
+    assert len(usage_ch2["clues_before"]) == 1
+    assert "因车祸去世" in usage_ch2["relationship_history"]
 
-    # 指导建议应该包含区分说明
-    assert "想起" in usage_ch2["guidance"] or "怀念" in usage_ch2["guidance"]
-    assert "说" in usage_ch2["guidance"] or "互动" in usage_ch2["guidance"]
+    # 母亲：添加冲突线索但未决裂
+    db.add_relationship_clue("母亲", chapter=2, clue_type="conflict", description="大吵一架", context="关于婚事发生激烈争吵")
+    usage_mother = db.check_person_usage("母亲", chapter=3)
+    print(f"✓ 第3章母亲使用上下文（冲突后）: {usage_mother}")
 
-    # 母亲状态应该还是 active
-    usage_mother = db.check_person_usage("母亲", chapter=2)
-    print(f"✓ 第2章母亲使用方式: {usage_mother}")
-    assert usage_mother["can_interact"]
-    assert usage_mother["can_remember"]
+    # 只有线索，没有硬编码限制
+    assert len(usage_mother["clues_before"]) == 1
+    assert usage_mother["clues_before"][0]["type"] == "conflict"
 
-    # 更新母亲状态为离开（断绝关系）
-    db.update_person_status("母亲", "departed", chapter=2, description="断绝母子关系")
-    usage_mother_after = db.check_person_usage("母亲", chapter=3)
-    print(f"✓ 第3章母亲使用方式（离开后）: {usage_mother_after}")
+    # 添加和解线索
+    db.add_relationship_clue("母亲", chapter=3, clue_type="reconcile", description="和解", context="第二天和好如初")
+    usage_mother_after = db.check_person_usage("母亲", chapter=4)
+    print(f"✓ 第4章母亲使用上下文（和解后）: {usage_mother_after}")
 
-    # 离开后：不能互动，但可以提及
-    assert not usage_mother_after["can_interact"]
-    assert usage_mother_after["can_remember"]
+    # 验证有两个线索
+    assert len(usage_mother_after["clues_before"]) == 2
 
-    print("✓ 人物状态追踪测试通过")
+    print("✓ 人物关系线索追踪测试通过")
     print("  验证要点：")
-    print("  - 已故/离开人物：不能互动，但可以回忆/提及")
-    print("  - 活跃人物：可以互动也可以回忆")
-    print("  - 系统提供明确的使用指导给LLM")
+    print("  - 代码只提取线索，不做硬编码判断")
+    print("  - 物理状态（去世）单独记录，是客观事实")
+    print("  - 关系线索可以是任意描述：冲突、和解、疏远等")
+    print("  - LLM根据线索综合理解关系动态")
 
 
 async def test_review_report():

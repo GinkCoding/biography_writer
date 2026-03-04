@@ -437,8 +437,14 @@ JSON格式：
         for round_num in range(1, max_rounds + 1):
             logger.info(f"      审核轮次 {round_num}/{max_rounds}")
 
-            # 并行4维度审核
-            review = await self._parallel_review(content, chapter, outline, state, previous_summaries)
+            # 使用LLM分析人物关系（动态理解，取代硬编码规则）
+            logger.info("         分析人物关系...")
+            relationship_analyses = await self._analyze_person_relationships(content, chapter_num)
+
+            # 并行4维度审核（传入关系分析结果）
+            review = await self._parallel_review(
+                content, chapter, outline, state, previous_summaries, relationship_analyses
+            )
 
             if review.all_passed():
                 logger.info(f"      ✓ 全部通过")
@@ -561,7 +567,8 @@ JSON格式：
 
     async def _parallel_review(
         self, content: str, chapter: ChapterOutline, outline: BookOutline,
-        state: PipelineState, previous_summaries: List[str]
+        state: PipelineState, previous_summaries: List[str],
+        relationship_analyses: Optional[Dict] = None
     ) -> ReviewReport:
         """并行4维度审核"""
 
@@ -571,7 +578,10 @@ JSON格式：
         chapter_num = chapter.order if hasattr(chapter, 'order') else 0
         fact_task = self.fact_checker.review(content, material, chapter)
         continuity_task = self.continuity_checker.review(
-            content, chapter, previous_summaries, chapter_num=chapter_num, facts_db=self.facts_db
+            content, chapter, previous_summaries,
+            chapter_num=chapter_num,
+            facts_db=self.facts_db,
+            relationship_analyses=relationship_analyses
         )
         repetition_task = self.repetition_checker.review(content, chapter_num=chapter_num)
         literary_task = self.literary_checker.review(content, chapter)
@@ -735,8 +745,8 @@ JSON格式：
                     chapter=chapter_num
                 )
 
-        # 检测人物状态变化（去世、离开等）
-        self._detect_person_status_changes(content, chapter_num)
+        # 提取人物关系线索（去世、冲突、和解等）
+        self._extract_relationship_clues(content, chapter_num)
 
         # 从内容中提取地点
         location_patterns = ['市', '省', '县', '镇', '村']
@@ -751,53 +761,85 @@ JSON格式：
         # 保存更新
         self.facts_db.save()
 
-    def _detect_person_status_changes(self, content: str, chapter_num: int):
+    def _extract_relationship_clues(self, content: str, chapter_num: int):
         """
-        检测人物状态变化（去世、离开等）
+        提取人物关系线索（取代硬编码状态检测）
 
-        通过关键词匹配识别人物状态变化
+        代码只负责提取可能的线索，具体关系理解由LLM完成
         """
-        # 去世相关关键词
-        death_keywords = ['去世', '死亡', '病逝', '遇难', '牺牲', '过世', '离世', '辞世']
-        # 离开相关关键词
-        departure_keywords = ['离开', '出走', '断绝关系', '断绝父子关系', '断绝母女关系',
-                              '脱离关系', '一刀两断', '不再来往']
+        # 关系事件关键词（更丰富的集合）
+        clue_keywords = {
+            'death': ['去世', '死亡', '病逝', '遇难', '牺牲', '过世', '离世', '辞世', '走了'],
+            'breakup': ['断绝关系', '断绝父子关系', '断绝母女关系', '一刀两断', '恩断义绝'],
+            'conflict': ['大吵', '争吵', '打架', '冲突', '翻脸', '闹翻', '决裂', '冷战'],
+            'reconcile': ['和解', '和好', '原谅', '冰释前嫌', '重修旧好'],
+            'departure': ['离开', '出走', '远行', '分手', '离婚', '分居'],
+            'reunion': ['重逢', '团聚', '再见', '相遇'],
+            ' estrangement': ['疏远', '渐行渐远', '不再来往', '冷淡', '隔阂']
+        }
 
         for person_name in self.facts_db.persons:
-            # 检查该人物是否在内容中
             if person_name not in content:
                 continue
 
-            # 找到人物在内容中的位置
+            # 找到人物在内容中的所有位置
             for match in re.finditer(person_name, content):
-                # 获取上下文（前后100字符）
-                start = max(0, match.start() - 100)
-                end = min(len(content), match.end() + 100)
+                # 获取上下文（前后150字符，更丰富的上下文）
+                start = max(0, match.start() - 150)
+                end = min(len(content), match.end() + 150)
                 context = content[start:end]
 
-                # 检查去世关键词
-                for keyword in death_keywords:
-                    if keyword in context:
-                        self.facts_db.update_person_status(
-                            name=person_name,
-                            status="deceased",
-                            chapter=chapter_num,
-                            description=f"{keyword}"
-                        )
-                        logger.info(f"   记录人物状态: {person_name} 于第{chapter_num}章 {keyword}")
-                        break
+                # 检查各类线索
+                for clue_type, keywords in clue_keywords.items():
+                    for keyword in keywords:
+                        if keyword in context:
+                            # 添加线索（而非硬编码状态）
+                            self.facts_db.add_relationship_clue(
+                                name=person_name,
+                                chapter=chapter_num,
+                                clue_type=clue_type,
+                                description=f"{keyword}",
+                                context=context[:100]  # 保存部分上下文
+                            )
 
-                # 检查离开关键词
-                for keyword in departure_keywords:
-                    if keyword in context:
-                        self.facts_db.update_person_status(
-                            name=person_name,
-                            status="departed",
-                            chapter=chapter_num,
-                            description=f"{keyword}"
-                        )
-                        logger.info(f"   记录人物状态: {person_name} 于第{chapter_num}章 {keyword}")
-                        break
+                            # 特殊处理：去世是物理状态，需要额外记录
+                            if clue_type == 'death':
+                                self.facts_db.update_physical_status(
+                                    name=person_name,
+                                    status="deceased",
+                                    chapter=chapter_num
+                                )
+
+                            logger.info(f"   记录关系线索: {person_name} 于第{chapter_num}章 [{clue_type}] {keyword}")
+                            break  # 只记录第一个匹配的关键词
+
+    async def _analyze_person_relationships(self, content: str, chapter_num: int) -> Dict[str, Any]:
+        """
+        使用LLM分析人物关系
+
+        Returns:
+            各人物的关系分析结果
+        """
+        from src.core.relationship_analyzer import PersonRelationshipAnalyzer
+
+        analyzer = PersonRelationshipAnalyzer(self.llm)
+        analyses = {}
+
+        for person_name in self.facts_db.persons:
+            usage_context = self.facts_db.check_person_usage(person_name, chapter_num)
+
+            analysis = await analyzer.analyze_relationship(
+                person_name=person_name,
+                chapter=chapter_num,
+                relationship_history=usage_context["clues_before"],
+                physical_status=usage_context["physical_status"],
+                death_chapter=usage_context["death_chapter"],
+                current_content=content
+            )
+
+            analyses[person_name] = analysis
+
+        return analyses
 
     async def _assemble_final_book(self, state: PipelineState) -> Path:
         """Phase 7: 终审与组装"""

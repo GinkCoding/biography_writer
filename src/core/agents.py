@@ -99,7 +99,8 @@ class ContinuityChecker:
         self.facts_db = facts_db
 
     async def review(self, content: str, chapter_context: Any, previous_summaries: List[str],
-                     chapter_num: int = 0, facts_db: Any = None) -> DimensionReview:
+                     chapter_num: int = 0, facts_db: Any = None,
+                     relationship_analyses: Optional[Dict] = None) -> DimensionReview:
         """
         审核章节内部和与前一章的连贯性
 
@@ -112,71 +113,66 @@ class ContinuityChecker:
         """
         prev_text = "\n".join(previous_summaries) if previous_summaries else "本章为第一章"
 
-        # 检查人物使用方式（如果facts_db提供）
-        person_usage_guidance = []
-        person_status_info = ""
+        # 构建人物关系信息（优先使用LLM分析结果，否则使用facts_db原始数据）
+        person_relationship_info = ""
 
-        if facts_db and chapter_num > 0:
-            # 从内容中提取可能的人名（简单规则）
-            import re
-            potential_names = set(re.findall(r'[\u4e00-\u9fa5]{2,4}', content))
+        if relationship_analyses:
+            # 使用LLM分析的关系结果（更智能、更 nuanced）
+            person_relationship_info = "\n【人物关系分析（由LLM理解）】\n"
+            for name, analysis in relationship_analyses.items():
+                person_relationship_info += f"\n  【{name}】\n"
+                person_relationship_info += f"    状态: {analysis.relationship_state}\n"
+                person_relationship_info += f"    互动: {'可直接互动' if analysis.can_direct_interaction else '不宜直接互动'}\n"
+                person_relationship_info += f"    回忆: {'可以回忆提及' if analysis.can_be_remembered else '不宜回忆提及'}\n"
+                if analysis.appropriate_usage:
+                    person_relationship_info += f"    建议: {analysis.appropriate_usage}\n"
+                if analysis.inappropriate_usage:
+                    person_relationship_info += f"    避免: {analysis.inappropriate_usage}\n"
+                if analysis.reasoning:
+                    person_relationship_info += f"    依据: {analysis.reasoning[:100]}...\n"
 
-            # 构建人物使用指南
-            for name in potential_names:
-                if name in facts_db.persons:
-                    usage = facts_db.check_person_usage(name, chapter_num)
-                    if not usage["can_interact"]:
-                        person_usage_guidance.append(usage["guidance"])
-
-            # 构建人物状态摘要
-            if facts_db.persons:
-                person_status_info = "\n【已记录人物状态】\n"
-                for name, person in facts_db.persons.items():
-                    if person.status != "active":
-                        usage = facts_db.check_person_usage(name, chapter_num)
-                        person_status_info += f"  - {name}: {usage['restriction']}\n"
-                        person_status_info += f"    使用建议: {usage['guidance']}\n"
+        elif facts_db and chapter_num > 0:
+            # 回退：使用原始线索（没有LLM分析时）
+            person_relationship_info = "\n【人物关系线索（代码提取，供参考）】\n"
+            for name in facts_db.persons:
+                usage = facts_db.check_person_usage(name, chapter_num)
+                if usage["relationship_history"] != "无显著关系变化记录":
+                    person_relationship_info += f"\n  【{name}】\n"
+                    person_relationship_info += f"    物理状态: {'已故' if usage['physical_status'] == 'deceased' else '在世'}\n"
+                    person_relationship_info += f"    关系历史:\n{usage['relationship_history']}\n"
 
         prompt = f"""你是一位专业的叙事连贯性编辑。请审核以下章节的连贯性。
 
 【前序章节摘要】
 {prev_text}
-{person_status_info}
+{person_relationship_info}
 
 【当前章节】
 {content}
-
-【人物状态使用指南】
-{chr(10).join(person_usage_guidance) if person_usage_guidance else "暂无特殊限制"}
-
-重要区分：
-- ✅ 允许：回忆、怀念、提及往事（"想起父亲"、"父亲生前常说"）
-- ❌ 禁止：实际互动（"父亲说"、"父亲看着他"、"父亲在场"）
 
 【审核维度】
 1. 章间衔接：
    - 当前章节开头是否自然承接前序章节
    - 时间线是否连续（或合理跳跃）
-   - 人物状态是否一致
+   - 人物关系状态是否一致（根据上述关系分析）
 
 2. 章内连贯：
    - 时间线是否清晰（无混乱的时间跳跃）
    - 段落间逻辑是否顺畅
    - 新出现的人物/地点是否有交代
 
-3. 逻辑错误检查（注意区分严重程度）：
+3. 逻辑错误检查（结合关系分析）：
 
-   critical（必须修复）- 现实逻辑错误：
-   - 已去世人物进行实际互动（说话、动作、在场）
-   - 已断绝关系的人物如无其事地与传主互动
+   critical（必须修复）：
+   - 违反关系分析中的限制（如不宜互动的人物进行了直接对话）
    - 时间线严重矛盾（如年龄倒退）
 
-   major（应该修复）- 叙事逻辑问题：
-   - 已去世人物出现方式可能引起读者困惑（如没有上下文突然出现）
-   - 回忆与现实切换不清晰
+   major（应该修复）：
+   - 人物互动方式与关系状态不符（如冷淡期写热情互动）
+   - 关系变化缺乏过渡
 
 4. 情感表达质量：
-   - 对已故人物的怀念是否自然、有分寸
+   - 人物互动是否符合当前关系状态
    - 回忆与现实的比例是否恰当
 
 【输出要求】
