@@ -157,31 +157,72 @@ class FactsDatabase:
             person.status_description = description
             self.save()
 
-    def check_person_available(self, name: str, chapter: int) -> Dict:
+    def check_person_usage(self, name: str, chapter: int) -> Dict:
         """
-        检查某章节中人物是否可用（未去世/离开）
+        检查某章节中人物的使用方式是否恰当
+
+        去世/离开人物可以：回忆、追思、提及生前事迹
+        去世/离开人物不能：实际互动（说话、动作、在场）
 
         Returns:
             {
-                "available": bool,
-                "reason": str  # 如果不可用，说明原因
+                "can_interact": bool,      # 是否可以直接互动（说话、动作）
+                "can_remember": bool,      # 是否可以回忆、提及
+                "status": str,             # 人物当前状态
+                "restriction": str,        # 如有限制，说明具体限制
+                "guidance": str            # 给LLM的指导建议
             }
         """
         if name not in self.persons:
-            return {"available": True, "reason": ""}  # 新人物默认可用
+            return {
+                "can_interact": True,
+                "can_remember": True,
+                "status": "new",
+                "restriction": "",
+                "guidance": ""
+            }
 
         person = self.persons[name]
 
-        # 如果人物在第X章去世/离开，在第X章及之后不可用
-        if person.status in ["deceased", "departed"]:
-            if person.status_chapter and chapter >= person.status_chapter:
+        # 活跃人物：可以互动也可以回忆
+        if person.status == "active":
+            return {
+                "can_interact": True,
+                "can_remember": True,
+                "status": "active",
+                "restriction": "",
+                "guidance": ""
+            }
+
+        # 检查状态变更章节
+        if person.status_chapter and chapter >= person.status_chapter:
+            # 在第X章或之后，人物已去世/离开
+            if person.status == "deceased":
                 return {
-                    "available": False,
-                    "reason": f"'{name}'已在第{person.status_chapter}章{person.status_description}，"
-                              f"不应在第{chapter}章再次出现"
+                    "can_interact": False,
+                    "can_remember": True,
+                    "status": "deceased",
+                    "restriction": f"已于第{person.status_chapter}章去世",
+                    "guidance": f"'{name}'已去世，可以写'想起{name}'、'怀念{name}'、'回忆起{name}生前'，"
+                               f"但不能写'{name}说'、'{name}看着他'、'{name}在场'等直接互动"
+                }
+            elif person.status == "departed":
+                return {
+                    "can_interact": False,
+                    "can_remember": True,
+                    "status": "departed",
+                    "restriction": f"已于第{person.status_chapter}章离开",
+                    "guidance": f"'{name}'已离开，可以提及往事，但不能再写{name}与传主直接互动"
                 }
 
-        return {"available": True, "reason": ""}
+        # 状态变更前，人物仍是活跃的
+        return {
+            "can_interact": True,
+            "can_remember": True,
+            "status": person.status,
+            "restriction": "",
+            "guidance": ""
+        }
 
     def add_event(self, name: str, year: Optional[int], location: str, chapter: int,
                   month: Optional[int] = None, description: str = ""):

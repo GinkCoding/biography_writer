@@ -238,7 +238,7 @@ async def test_vector_store():
 
 
 async def test_person_status_tracking():
-    """测试人物状态追踪（去世/离开后不应再出现）"""
+    """测试人物状态追踪（去世/离开后不应再互动，但可以回忆）"""
     print("\n" + "="*60)
     print("测试5: 人物状态追踪")
     print("="*60)
@@ -265,30 +265,40 @@ async def test_person_status_tracking():
     assert db.persons["父亲"].status_chapter == 1
     print(f"✓ 父亲状态更新: deceased (第1章)")
 
-    # 检查第2章父亲是否可用（应该不可用）
-    check = db.check_person_available("父亲", chapter=2)
-    print(f"✓ 第2章检查父亲可用性: {check}")
-    assert not check["available"]
-    assert "去世" in check["reason"] or "已故" in check["reason"]
+    # 使用新的 check_person_usage 方法
+    usage_ch2 = db.check_person_usage("父亲", chapter=2)
+    print(f"✓ 第2章父亲使用方式: {usage_ch2}")
 
-    # 检查第1章父亲是否可用（仍然不可用，因为第1章已经去世）
-    check_ch1 = db.check_person_available("父亲", chapter=1)
-    print(f"✓ 第1章检查父亲可用性: {check_ch1}")
-    # 第1章及之后都不可用
-    assert not check_ch1["available"]
+    # 去世后：不能互动，但可以回忆
+    assert not usage_ch2["can_interact"], "去世后不应能互动"
+    assert usage_ch2["can_remember"], "去世后应该可以回忆"
+    assert usage_ch2["status"] == "deceased"
+    assert "去世" in usage_ch2["restriction"]
+
+    # 指导建议应该包含区分说明
+    assert "想起" in usage_ch2["guidance"] or "怀念" in usage_ch2["guidance"]
+    assert "说" in usage_ch2["guidance"] or "互动" in usage_ch2["guidance"]
 
     # 母亲状态应该还是 active
-    check_mother = db.check_person_available("母亲", chapter=2)
-    print(f"✓ 第2章检查母亲可用性: {check_mother}")
-    assert check_mother["available"]
+    usage_mother = db.check_person_usage("母亲", chapter=2)
+    print(f"✓ 第2章母亲使用方式: {usage_mother}")
+    assert usage_mother["can_interact"]
+    assert usage_mother["can_remember"]
 
     # 更新母亲状态为离开（断绝关系）
     db.update_person_status("母亲", "departed", chapter=2, description="断绝母子关系")
-    check_mother_after = db.check_person_available("母亲", chapter=3)
-    print(f"✓ 第3章检查母亲可用性（离开后）: {check_mother_after}")
-    assert not check_mother_after["available"]
+    usage_mother_after = db.check_person_usage("母亲", chapter=3)
+    print(f"✓ 第3章母亲使用方式（离开后）: {usage_mother_after}")
+
+    # 离开后：不能互动，但可以提及
+    assert not usage_mother_after["can_interact"]
+    assert usage_mother_after["can_remember"]
 
     print("✓ 人物状态追踪测试通过")
+    print("  验证要点：")
+    print("  - 已故/离开人物：不能互动，但可以回忆/提及")
+    print("  - 活跃人物：可以互动也可以回忆")
+    print("  - 系统提供明确的使用指导给LLM")
 
 
 async def test_review_report():

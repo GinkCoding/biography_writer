@@ -112,33 +112,30 @@ class ContinuityChecker:
         """
         prev_text = "\n".join(previous_summaries) if previous_summaries else "本章为第一章"
 
-        # 检查人物可用性（如果facts_db提供）
-        person_availability_issues = []
+        # 检查人物使用方式（如果facts_db提供）
+        person_usage_guidance = []
+        person_status_info = ""
+
         if facts_db and chapter_num > 0:
             # 从内容中提取可能的人名（简单规则）
             import re
             potential_names = set(re.findall(r'[\u4e00-\u9fa5]{2,4}', content))
+
+            # 构建人物使用指南
             for name in potential_names:
                 if name in facts_db.persons:
-                    check = facts_db.check_person_available(name, chapter_num)
-                    if not check["available"]:
-                        person_availability_issues.append({
-                            "type": "logic_error",
-                            "location": "全文",
-                            "description": check["reason"],
-                            "severity": "critical"
-                        })
+                    usage = facts_db.check_person_usage(name, chapter_num)
+                    if not usage["can_interact"]:
+                        person_usage_guidance.append(usage["guidance"])
 
-        # 获取人物状态信息
-        person_status_info = ""
-        if facts_db and facts_db.persons:
-            person_status_info = "\n【已记录人物状态】\n"
-            for name, person in facts_db.persons.items():
-                if person.status != "active":
-                    person_status_info += f"  - {name}: {person.status}"
-                    if person.status_chapter:
-                        person_status_info += f" (第{person.status_chapter}章)"
-                    person_status_info += "\n"
+            # 构建人物状态摘要
+            if facts_db.persons:
+                person_status_info = "\n【已记录人物状态】\n"
+                for name, person in facts_db.persons.items():
+                    if person.status != "active":
+                        usage = facts_db.check_person_usage(name, chapter_num)
+                        person_status_info += f"  - {name}: {usage['restriction']}\n"
+                        person_status_info += f"    使用建议: {usage['guidance']}\n"
 
         prompt = f"""你是一位专业的叙事连贯性编辑。请审核以下章节的连贯性。
 
@@ -149,25 +146,38 @@ class ContinuityChecker:
 【当前章节】
 {content}
 
+【人物状态使用指南】
+{chr(10).join(person_usage_guidance) if person_usage_guidance else "暂无特殊限制"}
+
+重要区分：
+- ✅ 允许：回忆、怀念、提及往事（"想起父亲"、"父亲生前常说"）
+- ❌ 禁止：实际互动（"父亲说"、"父亲看着他"、"父亲在场"）
+
 【审核维度】
 1. 章间衔接：
    - 当前章节开头是否自然承接前序章节
    - 时间线是否连续（或合理跳跃）
-   - 人物状态是否一致（特别注意：已去世/离开人物不应再次出现）
+   - 人物状态是否一致
 
 2. 章内连贯：
    - 时间线是否清晰（无混乱的时间跳跃）
    - 段落间逻辑是否顺畅
    - 新出现的人物/地点是否有交代
 
-3. 严重逻辑错误检查（必须标记为critical）：
-   - 已去世人物再次活动或对话
-   - 已断绝关系的人物如无其事地出现
+3. 逻辑错误检查（注意区分严重程度）：
+
+   critical（必须修复）- 现实逻辑错误：
+   - 已去世人物进行实际互动（说话、动作、在场）
+   - 已断绝关系的人物如无其事地与传主互动
    - 时间线严重矛盾（如年龄倒退）
 
-4. 伏笔与呼应：
-   - 前序章节的伏笔是否有所回应
-   - 本章设置的伏笔是否自然
+   major（应该修复）- 叙事逻辑问题：
+   - 已去世人物出现方式可能引起读者困惑（如没有上下文突然出现）
+   - 回忆与现实切换不清晰
+
+4. 情感表达质量：
+   - 对已故人物的怀念是否自然、有分寸
+   - 回忆与现实的比例是否恰当
 
 【输出要求】
 JSON格式：
@@ -177,23 +187,26 @@ JSON格式：
         {{
             "type": "logic_error",
             "location": "第3段",
-            "description": "父亲在第1章已去世，但本段描写'父亲摸着他的头'",
-            "severity": "critical"
+            "description": "父亲在第1章已去世，但本段直接对话'父亲说：你要好好工作'（去世后不应再说话）",
+            "severity": "critical",
+            "suggestion": "改为回忆形式：'他想起父亲生前常说的那句话：你要好好工作'"
         }},
         {{
-            "type": "timeline_gap",
-            "location": "第2节",
-            "description": "从1985年直接跳到1988年，缺少3年过渡",
-            "severity": "major"
+            "type": "continuity_issue",
+            "location": "第5段",
+            "description": "提到父亲时未说明是回忆，可能造成读者困惑",
+            "severity": "major",
+            "suggestion": "增加过渡，如'看着这张照片，他不禁想起父亲'"
         }}
     ],
     "score": 90,
-    "suggestions": ["建议补充1986-1987年的过渡段落"]
+    "suggestions": ["建议明确区分现实与回忆的界限"]
 }}
 
-注意：
-- severity为critical的问题必须修复，否则传记存在严重逻辑错误
-- 如果发现已去世/离开人物再次出现，必须是critical级别"""
+判断标准：
+- 回忆/怀念已故人物是正常情感表达，不应禁止
+- 只有让已故人物"复活"参与现实互动才是逻辑错误
+- 注意语气：回忆应该是传主的内心活动或叙述，而非人物的实时表现"""
 
         try:
             response = await self.llm.complete(
