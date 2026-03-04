@@ -85,8 +85,8 @@ async def main():
         max_revision_rounds=args.max_revision_rounds
     )
 
-    # 运行流水线
-    pipeline = BiographyPipeline(config)
+    # 运行流水线（传递output_dir以初始化facts_db和vector_store）
+    pipeline = BiographyPipeline(config, output_dir=args.output)
 
     try:
         final_path = await pipeline.run(

@@ -1,0 +1,47 @@
+{
+  "persons": {
+    "张三": {
+      "name": "张三",
+      "relationship": "父亲",
+      "first_appearance": 1,
+      "description": "传主的父亲"
+    },
+    "李四": {
+      "name": "李四",
+      "relationship": "朋友",
+      "first_appearance": 2,
+      "description": ""
+    }
+  },
+  "events": [
+    {
+      "name": "出生",
+      "year": 1965,
+      "month": null,
+      "location": "北京",
+      "chapter": 1,
+      "section": null,
+      "description": "在北京出生"
+    },
+    {
+      "name": "上学",
+      "year": 1972,
+      "month": null,
+      "location": "北京",
+      "chapter": 1,
+      "section": null,
+      "description": ""
+    }
+  ],
+  "locations": {
+    "北京": {
+      "name": "北京",
+      "first_appearance": 1,
+      "description": "首都"
+    }
+  },
+  "timeline_gaps": [],
+  "key_numbers": [],
+  "subject_birth_year": 1965,
+  "updated_at": "2026-03-04T22:47:16.057473"
+}

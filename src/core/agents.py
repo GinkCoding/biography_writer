@@ -18,8 +18,9 @@ class DimensionReview:
 class FactChecker:
     """事实审核Agent - 检查与原始素材的矛盾"""
 
-    def __init__(self, llm):
+    def __init__(self, llm, facts_db=None):
         self.llm = llm
+        self.facts_db = facts_db
 
     async def review(self, content: str, material: str, chapter_context: Any) -> DimensionReview:
         """
@@ -93,8 +94,9 @@ class FactChecker:
 class ContinuityChecker:
     """连贯审核Agent - 检查时间线、章间衔接"""
 
-    def __init__(self, llm):
+    def __init__(self, llm, facts_db=None):
         self.llm = llm
+        self.facts_db = facts_db
 
     async def review(self, content: str, chapter_context: Any, previous_summaries: List[str]) -> DimensionReview:
         """
@@ -167,20 +169,29 @@ JSON格式：
 class RepetitionChecker:
     """重复审核Agent - 检查内容重复和车轱辘话"""
 
-    def __init__(self, llm):
+    def __init__(self, llm, vector_store=None):
         self.llm = llm
+        self.vector_store = vector_store
 
-    async def review(self, content: str, previous_chapters: List[Dict]) -> DimensionReview:
+    async def review(self, content: str, chapter_num: int = None) -> DimensionReview:
         """
         审核内容是否重复或与之前章节重复
+
+        Args:
+            content: 当前章节内容
+            chapter_num: 当前章节编号（用于排除自身）
         """
-        # 提取之前章节的摘要
+        # 使用向量存储计算相似度
+        similar_chapters = []
+        if self.vector_store:
+            similar_chapters = self.vector_store.find_similar_chapters(content, threshold=0.6)
+            # 排除自身
+            similar_chapters = [ch for ch in similar_chapters if ch['chapter_num'] != chapter_num]
+
+        # 获取之前章节的摘要
         prev_summaries = ""
-        if previous_chapters:
-            summaries = []
-            for ch in previous_chapters[-3:]:  # 最近3章
-                summaries.append(f"《{ch['title']}》: {ch['content'][:300]}...")
-            prev_summaries = "\n\n".join(summaries)
+        if self.vector_store:
+            prev_summaries = "\n".join(self.vector_store.get_all_summaries()[-3:])
 
         prompt = f"""你是一位注重文字简洁性的编辑。请审核以下章节是否存在重复问题。
 
@@ -205,6 +216,9 @@ class RepetitionChecker:
 
 4. 信息密度：
    - 段落是否信息量过低（用大量文字说少量内容）
+
+【向量存储相似度分析】
+{chr(10).join([f"- 与第{ch['chapter_num']}章《{ch['title']}》相似度: {ch['similarity']:.2f}" for ch in similar_chapters]) if similar_chapters else "暂无明显相似章节"}
 
 【输出要求】
 JSON格式：

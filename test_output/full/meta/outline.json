@@ -1,0 +1,26 @@
+{
+  "subject_name": "测试人物",
+  "total_chapters": 1,
+  "target_total_words": 5000,
+  "chapters": [
+    {
+      "order": 1,
+      "title": "测试章",
+      "time_range": "2000-2001",
+      "target_words": 5000,
+      "sections": [
+        {
+          "order": 1,
+          "title": "测试节",
+          "content_summary": "测试内容",
+          "target_words": 5000,
+          "section_type": "factual",
+          "key_events": [
+            "测试事件"
+          ],
+          "inference_basis": ""
+        }
+      ]
+    }
+  ]
+}

@@ -244,6 +244,30 @@ class ReviewReport:
         ]
         return sum(scores) // len(scores)
 
+    def is_perfect(self) -> bool:
+        """是否完美通过（无问题且高分）"""
+        return self.all_passed() and self.calculate_score() >= 95
+
+    def to_text_summary(self) -> str:
+        """转为文本摘要"""
+        lines = [
+            f"综合评分: {self.calculate_score()}",
+            f"事实性: {'通过' if self.fact_review.passed else '未通过'} ({self.fact_review.score}分)",
+            f"连贯性: {'通过' if self.continuity_review.passed else '未通过'} ({self.continuity_review.score}分)",
+            f"重复性: {'通过' if self.repetition_review.passed else '未通过'} ({self.repetition_review.score}分)",
+            f"文学性: {'通过' if self.literary_review.passed else '未通过'} ({self.literary_review.score}分)",
+        ]
+
+        all_issues = self.get_issues()
+        if all_issues:
+            lines.append(f"\n问题列表 ({len(all_issues)}个):")
+            for i, issue in enumerate(all_issues[:5], 1):  # 最多显示5个
+                lines.append(f"  {i}. {issue.get('type', '未知')}: {issue.get('description', '')[:50]}...")
+        else:
+            lines.append("\n无问题")
+
+        return "\n".join(lines)
+
     def get_issues(self) -> List[Dict]:
         """获取所有问题"""
         all_issues = []

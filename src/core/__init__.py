@@ -10,11 +10,14 @@ from .agents import (
     FactChecker, ContinuityChecker, RepetitionChecker, LiteraryChecker,
     QualitySelector
 )
+from .facts_db import FactsDatabase
+from .vector_store import SimpleVectorStore
 
 __all__ = [
     'BiographyPipeline', 'PipelineState',
     'BookOutline', 'ChapterOutline', 'SectionOutline',
     'MaterialEvaluation', 'ReviewReport', 'GenerationConfig',
     'FactChecker', 'ContinuityChecker', 'RepetitionChecker', 'LiteraryChecker',
-    'QualitySelector'
+    'QualitySelector',
+    'FactsDatabase', 'SimpleVectorStore'
 ]

@@ -13,11 +13,13 @@ from src.core.agents import (
     FactChecker, ContinuityChecker, RepetitionChecker, LiteraryChecker,
     QualitySelector
 )
+from src.core.facts_db import FactsDatabase
 from src.core.models import (
     MaterialEvaluation, BookOutline, ChapterOutline,
     ReviewReport, RevisionHistory, GenerationConfig
 )
 from src.llm_client import LLMClient
+from src.core.vector_store import SimpleVectorStore
 
 
 @dataclass
@@ -37,19 +39,25 @@ class PipelineState:
 class BiographyPipeline:
     """全自动传记生成流水线"""
 
-    def __init__(self, config: Optional[GenerationConfig] = None):
+    def __init__(self, config: Optional[GenerationConfig] = None, output_dir: Optional[Path] = None):
         self.config = config or GenerationConfig()
         self.llm = LLMClient()
+        self.output_dir = output_dir
+
+        # 初始化事实数据库（轻量级JSON存储）
+        facts_db_path = output_dir / "meta" / "facts_db.json" if output_dir else Path("facts_db.json")
+        self.facts_db = FactsDatabase(facts_db_path)
+
+        # 初始化向量存储（用于重复检测）
+        vector_store_path = output_dir / "meta" / "vector_store.json" if output_dir else Path("vector_store.json")
+        self.vector_store = SimpleVectorStore(vector_store_path)
 
         # 初始化审核Agent
-        self.fact_checker = FactChecker(self.llm)
-        self.continuity_checker = ContinuityChecker(self.llm)
-        self.repetition_checker = RepetitionChecker(self.llm)
+        self.fact_checker = FactChecker(self.llm, self.facts_db)
+        self.continuity_checker = ContinuityChecker(self.llm, self.facts_db)
+        self.repetition_checker = RepetitionChecker(self.llm, self.vector_store)
         self.literary_checker = LiteraryChecker(self.llm)
         self.quality_selector = QualitySelector(self.llm)
-
-        # 向量存储（持久化）
-        self.vector_store = None
 
     async def run(self, material_path: Path, output_dir: Path, target_words: int = 100000) -> Path:
         """
@@ -229,7 +237,7 @@ class BiographyPipeline:
 
 【目标】
 - 总字数: {state.target_words}字
-- 章节数: 建议{evaluation.chapter_suggestion.recommended_chapters}章
+- 章节数: 建议{evaluation.chapter_suggestion.get('recommended_chapters', 5)}章
 
 【采访素材】
 {material[:8000]}...
@@ -461,6 +469,18 @@ JSON格式：
         header = self._make_chapter_header(chapter, revision_history)
         chapter_file.write_text(header + "\n\n" + content, encoding='utf-8')
 
+        # 更新向量存储（用于后续章节的重复检测）
+        self.vector_store.add_chapter(
+            chapter_num=chapter_num,
+            title=chapter.title,
+            content=content,
+            summary=content[:200],
+            key_events=[s.title for s in chapter.sections]
+        )
+
+        # 更新事实数据库
+        self._update_facts_db(content, chapter, chapter_num)
+
         return content
 
     async def _generate_chapter_draft(
@@ -541,9 +561,10 @@ JSON格式：
         material = state.material_path.read_text(encoding='utf-8')
 
         # 并行执行4个审核
+        chapter_num = chapter.order if hasattr(chapter, 'order') else 0
         fact_task = self.fact_checker.review(content, material, chapter)
         continuity_task = self.continuity_checker.review(content, chapter, previous_summaries)
-        repetition_task = self.repetition_checker.review(content, state.generated_chapters)
+        repetition_task = self.repetition_checker.review(content, chapter_num=chapter_num)
         literary_task = self.literary_checker.review(content, chapter)
 
         fact_result, continuity_result, repetition_result, literary_result = await asyncio.gather(
@@ -662,6 +683,60 @@ JSON格式：
             header += f"- 第{s.order}节 [{s.section_type}]: {s.title}\n"
         header += "\n" + "="*60 + "\n"
         return header
+
+    def _update_facts_db(self, content: str, chapter: ChapterOutline, chapter_num: int):
+        """更新事实数据库"""
+        import re
+
+        # 从章节标题提取时间范围
+        time_range = chapter.time_range if hasattr(chapter, 'time_range') else ""
+        years = re.findall(r'19\d{2}|20\d{2}', time_range)
+
+        # 添加事件
+        for section in chapter.sections:
+            # 提取节标题中的关键信息
+            section_title = section.title if hasattr(section, 'title') else ""
+
+            # 尝试提取年份
+            section_years = re.findall(r'19\d{2}|20\d{2}', section_title)
+            event_year = int(section_years[0]) if section_years else (int(years[0]) if years else None)
+
+            self.facts_db.add_event(
+                name=section_title,
+                year=event_year,
+                location="",  # 从内容提取较复杂，暂不提取
+                chapter=chapter_num,
+                description=section.content_summary if hasattr(section, 'content_summary') else ""
+            )
+
+        # 从内容中提取人物（简单规则：2-4个中文字符且出现多次）
+        potential_names = re.findall(r'[\u4e00-\u9fa5]{2,4}', content)
+        name_counts = {}
+        for name in potential_names:
+            if name not in ['我们', '他们', '但是', '因为', '所以', '这个', '那个', '什么', '自己']:
+                name_counts[name] = name_counts.get(name, 0) + 1
+
+        # 出现多次的可能为人名
+        for name, count in name_counts.items():
+            if count >= 3:
+                self.facts_db.add_person(
+                    name=name,
+                    relationship="未明确",  # 后续可以改进提取
+                    chapter=chapter_num
+                )
+
+        # 从内容中提取地点
+        location_patterns = ['市', '省', '县', '镇', '村']
+        for pattern in location_patterns:
+            locations = re.findall(rf'[\u4e00-\u9fa5]{{1,5}}{pattern}', content)
+            for loc in set(locations):  # 去重
+                self.facts_db.add_location(
+                    name=loc,
+                    chapter=chapter_num
+                )
+
+        # 保存更新
+        self.facts_db.save()
 
     async def _assemble_final_book(self, state: PipelineState) -> Path:
         """Phase 7: 终审与组装"""
