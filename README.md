@@ -1,16 +1,27 @@
-# 传记写作工具
+# 传记写作工具（LLM-Driven 架构）
 
-将采访文本转化为十万字长篇传记的AI写作系统。
+将采访文本转化为十万字长篇传记的AI写作系统。采用LLM驱动架构，让大模型成为核心决策者。
 
-## 系统架构
+> **注意**：这是 `llm-driven-architecture` 分支，采用全新的7阶段流水线架构。如需查看旧版五层架构，请切换到 `main` 分支。
 
-基于五层架构设计：
+## 架构理念
 
-1. **数据接入与解析层** - 清洗采访文本，切分话题块，存入向量数据库
-2. **知识构建与全局记忆层** - 抽取实体关系，构建时间线，管理全局状态
-3. **规划与编排层** - 确定写作风格，生成三级大纲（卷-章-节）
-4. **迭代生成层** - 上下文组装，逐节生成，时代背景增强
-5. **审校与输出层** - 双重Agent事实核查，逻辑校验，多格式输出
+本分支采用**LLM-Driven架构**，核心理念：
+
+1. **LLM是决策者，不只是生成器** - 素材评估、大纲设计、质量判断都由LLM完成
+2. **正面引导，而非硬约束** - 告诉LLM"要做什么"，而非"不能做什么"
+3. **代码提取事实，LLM理解上下文** - 代码只记录线索，LLM理解复杂关系动态
+4. **累积式修订** - 每轮修订附带历史，LLM看到完整的修改轨迹
+
+## 7阶段流水线
+
+```
+采访素材 → [1.素材评估] → [2.大纲生成] → [3.大纲审核] → [4.章节生成] → [5.四维度审核] → [6.累积修订] → [7.终稿组装]
+              ↓                ↓              ↓              ↓              ↓              ↓
+         评估报告          双版本竞争      时间线检查      逐章扩展      并行审核       迭代优化
+         建议字数          LLM选择最优      重复性检查      关系分析      事实/连贯/      带历史记录
+         推断策略                                                  重复/文学      多轮迭代
+```
 
 ## 快速开始
 
@@ -28,176 +39,165 @@ cp .env.example .env
 # 编辑 .env 文件，填入你的API密钥
 ```
 
-### 3. 准备采访文件
+支持的模型提供商：
+- **Kimi**（默认，推荐）: `kimi-k2-5-long-context`，128K上下文
+- **OpenAI**: `gpt-4-turbo-preview`
+- **智谱**: `zhipuai`
 
-将采访文本放入 `interviews/` 目录，支持 `.txt` 或 `.md` 格式。
-
-### 4. 初始化项目
-
-```bash
-python -m src init
-# 或指定文件
-python -m src init 张三采访.txt --subject 张三 --style literary
-```
-
-### 5. 生成传记
+### 3. 运行流水线
 
 ```bash
-python -m src write
-# 或指定项目
-python -m src write --id <项目ID>
+# 基本用法
+python run_pipeline.py /path/to/interview.txt
+
+# 指定输出目录和目标字数
+python run_pipeline.py /path/to/interview.txt --output ./output --target-words 100000
+
+# 使用测试模式（验证流程，不实际调用LLM）
+python test_pipeline_minimal.py
 ```
 
-### 6. 查看运行态监控
+### 4. 查看结果
 
 ```bash
-# 查看项目状态（含运行阶段、最后消息、监控文件路径）
-python -m src status --id <项目ID>
+# 生成的传记位于
+output/<项目ID>/biography_<日期>.md
 
-# 不依赖outline，直接查看最近一次运行态（适合init阶段排障）
-python -m src runtime-status --id <项目ID> --tail 10
-
-# 持续追踪运行事件（观察是否“卡住”）
-python -m src runtime-status --id <项目ID> --follow --interval 2
-
-# 汇总本次运行的事件与节点产物，并输出 runtime_report.json
-python -m src runtime-report --id <项目ID>
+# 中间产物
+output/<项目ID>/
+├── evaluation_report.json      # 素材评估报告
+├── outline_final.json          # 最终大纲
+├── chapters/                   # 各章节草稿
+│   ├── chapter_01.md
+│   ├── chapter_01_review.json  # 审核结果
+│   └── chapter_01_v1.md        # 修订版本
+├── facts_db.json               # 事实数据库
+└── vector_store.json           # 向量存储
 ```
 
-### 7. 事实债务与Claim核查文件（重点）
+## 核心组件
 
-当某些 claim 在自动重写后仍证据不足或冲突时，系统会把问题放入“事实债务队列”，不中断全书生成。
+### 事实数据库 (`facts_db.py`)
+
+轻量级JSON存储，记录：
+- **人物**: 姓名、关系、首次出场章节、物理状态（在世/去世）
+- **关系线索**: 动态记录关系变化（如"大吵一架"、"和解"、"疏远"）
+- **事件**: 时间、地点、描述
+- **地点**: 名称、描述
+
+关键特点：**代码只提取线索，LLM理解关系动态**。不硬编码"死亡=不能出现"，而是让LLM根据上下文判断合理的表达方式。
+
+### 关系分析器 (`relationship_analyzer.py`)
+
+使用LLM分析人物关系的微妙之处：
+- 区分"大吵但未决裂" vs "彻底断绝"
+- 理解"表面和解但心存芥蒂"
+- 判断哪些互动在当前关系状态下是合理的
+
+### 四维度审核 (`agents.py`)
+
+每个章节生成后，并行运行4个审核Agent：
+
+| Agent | 职责 | 检查内容 |
+|-------|------|----------|
+| **FactChecker** | 事实审核 | 与原始素材的矛盾（时间、地点、人物、事件、数字） |
+| **ContinuityChecker** | 连贯审核 | 时间线连续性、章间衔接、人物关系一致性 |
+| **RepetitionChecker** | 重复审核 | 跨章重复、章内重复、车轱辘话、信息密度 |
+| **LiteraryChecker** | 文学审核 | 描写质量、对话质量、叙事节奏、情感表达 |
+
+### 累积式修订
+
+未通过的章节进入修订循环：
+1. 收集所有审核意见
+2. 保留修订历史（之前修改过什么）
+3. LLM根据审核意见和历史进行修订
+4. 重新审核，直到通过或达到最大迭代次数
+
+## 配置选项
+
+### 环境变量 (.env)
 
 ```bash
-# 先看本次运行的review产物目录
-RUN_ID=$(ls -dt .observability/runs/* | head -1 | xargs -n1 basename)
-ls -lah ".observability/runs/$RUN_ID/artifacts/05_review"
+# Kimi（推荐）
+LLM_PROVIDER=kimi
+KIMI_API_KEY=your_kimi_api_key_here
+KIMI_BASE_URL=https://api.moonshot.cn/v1
+KIMI_MODEL=kimi-k2-5-long-context
 
-# 1) 运行期债务快照（去重后的内存视图）
-cat ".observability/runs/$RUN_ID/artifacts/05_review/fact_debt_snapshot.json" | jq '.'
-
-# 2) 运行期债务流水（按记录追加）
-cat "output/_fact_debt/${RUN_ID}_fact_debt.jsonl"
-
-# 3) 终稿结算摘要（总数/已解决/未解决）
-BOOK_ID=$(ls -t .cache/*_outline.json | head -1 | xargs -n1 basename | sed 's/_outline.json$//')
-cat "output/${BOOK_ID}/fact_debt_summary.json" | jq '.summary'
-
-# 4) 终稿仍待人工复核的claim（最关键）
-cat "output/${BOOK_ID}/fact_debt_pending.jsonl"
+# SiliconFlow Embedding（可选）
+SILICONFLOW_API_KEY=your_siliconflow_api_key_here
 ```
 
-文件说明：
-- `artifacts/05_review/fact_debt_snapshot.json`：当前运行内存态的债务快照，适合调试“为什么卡在同类claim”。
-- `output/_fact_debt/<run_id>_fact_debt.jsonl`：运行过程的追加日志，适合追踪每次入队来源（如 `terminal_retry_exhausted`）。
-- `output/<book_id>/fact_debt_summary.json`：终稿阶段自动清债后的统计和全量记录。
-- `output/<book_id>/fact_debt_pending.jsonl`：最终仍未解决的 claim，建议优先人工复核这一份。
+### 生成参数 (config/settings.yaml)
 
-## 可用写作风格
+```yaml
+model:
+  provider: openai
+  base_url: https://coding.dashscope.aliyuncs.com/v1
+  model: qwen3.5-plus
+  max_tokens: 32768
+  request_timeout_seconds: 300
 
-| 风格ID | 名称 | 特点 |
-|--------|------|------|
-| documentary | 纪实严谨 | 客观中立、史料详实 |
-| literary | 文学散文 | 抒情描写、场景还原 |
-| investigative | 新闻调查 | 抽丝剥茧、悬念设置 |
-| memoir | 温情回忆 | 第一人称感、情感细腻 |
-| inspirational | 励志传记 | 突出成长、强调转折 |
-
-查看所有风格：
-```bash
-python -m src styles
+generation:
+  target_length: 10000      # 目标字数（默认1万字，可调整到10万）
+  total_chapters: 25        # 章节数
+  sections_per_chapter: 4   # 每章节数
+  style: literary           # 风格
 ```
 
-## 项目结构
+## 与旧版架构的区别
+
+| 特性 | 旧版（main分支） | 新版（本分支） |
+|------|-----------------|---------------|
+| 架构 | 五层工程化架构 | 7阶段LLM流水线 |
+| 素材处理 | 切分块，RAG检索 | 全素材给LLM理解 |
+| 大纲生成 | 模板+规则 | LLM自由设计，双版本竞争 |
+| 人物状态 | 硬编码（死亡=不能出现） | 线索记录，LLM理解语境 |
+| 审核方式 | 单一FactChecker | 四维度并行审核 |
+| 修订机制 | 单轮重写 | 累积式多轮修订 |
+| 字数控制 | 严格限制每节字数 | 整体把控，弹性范围 |
+
+## 文件结构
 
 ```
 biography_writer/
-├── interviews/          # 采访文件存放目录
-├── output/              # 生成的传记输出目录
+├── run_pipeline.py              # 主入口脚本
+├── test_pipeline_minimal.py     # 最小化测试
 ├── config/
-│   ├── settings.yaml    # 主配置
-│   └── styles.yaml      # 风格模板
+│   ├── settings.yaml            # 模型配置
+│   └── styles.yaml              # 写作风格
 ├── src/
-│   ├── cli.py           # 命令行入口
-│   ├── engine.py        # 主引擎
-│   ├── layers/          # 五层架构实现
-│   │   ├── data_ingestion.py
-│   │   ├── knowledge_memory.py
-│   │   ├── planning.py
-│   │   ├── generation.py
-│   │   └── review_output.py
-│   └── ...
-└── README.md
-```
-
-## 输出格式
-
-生成完成后，输出目录包含：
-
-```
-output/<书名>_<日期>/
-├── metadata.json           # 元数据
-├── outline.json            # 完整大纲
-├── <书名>.md               # Markdown完整版
-├── <书名>.txt              # 纯文本完整版
-└── chapters/               # 分章节文件
-    ├── 01_童年时光.md
-    ├── 02_求学之路.md
-    └── ...
-
-# 若启用事实债务队列，还会额外输出：
-output/_fact_debt/<run_id>_fact_debt.jsonl
-output/<book_id>/fact_debt_summary.json
-output/<book_id>/fact_debt_pending.jsonl
-```
-
-运行时监控文件位于：
-
-```
-.observability/runs/<run_id>/
-├── status.json              # 当前阶段、最后消息、事件计数
-├── events.jsonl             # 结构化事件流（started/running/heartbeat/completed/failed）
-├── artifacts_manifest.json  # 节点产物清单（可直接用于整合分析）
-└── artifacts/
-    ├── 01_data_ingestion/*.json
-    ├── 02_knowledge_memory/*.json
-    ├── 03_planning/*.json
-    ├── 04_generation/*.json
-    ├── 05_review/*.json      # 包含 fact_claims_*.json / fact_debt_snapshot.json
-    └── 06_output/*.json      # 包含 fact_debt_settlement.json
+│   ├── core/
+│   │   ├── pipeline.py          # 7阶段流水线主逻辑
+│   │   ├── agents.py            # 4个审核Agent
+│   │   ├── models.py            # 数据模型
+│   │   ├── facts_db.py          # 事实数据库
+│   │   ├── relationship_analyzer.py  # 关系分析器
+│   │   └── vector_store.py      # 向量存储
+│   ├── llm_client.py            # LLM客户端（支持思考模式）
+│   └── config.py                # 配置管理
+├── interviews/                  # 采访文件存放目录
+├── output/                      # 生成的传记输出目录
+└── README.md                    # 本文件
 ```
 
 ## 技术特点
 
-- **RAG检索增强**：基于向量数据库检索相关素材，防止幻觉
-- **容错式关键信息提取**：采访稿提取失败自动降级，不因脏文本直接中断
-- **滑动窗口记忆**：只携带必要上下文，避免灾难性遗忘
-- **双重Agent审校**：生成Agent与审查Agent博弈，保证事实准确
-- **时代背景增强**：自动融入对应年代的社会风貌细节
-- **智能大纲规划**：基于时间线自动分配章节和篇幅
-
-## 配置选项
-
-编辑 `config/settings.yaml`：
-
-```yaml
-model:
-  provider: kimi  # 或 openai, zhipuai
-  model: kimi-k2-5-long-context
-  max_tokens: 4000
-
-generation:
-  target_length: 100000  # 目标字数
-  total_chapters: 25     # 章节数
-  style: literary        # 默认风格
-```
+- **全素材理解**: 采访素材完整提供给LLM，而非切片检索
+- **双版本竞争**: 大纲生成两版本，LLM选择最优
+- **关系线索系统**: 不硬编码状态，记录线索让LLM理解动态
+- **四维度审核**: 事实、连贯、重复、文学四个角度并行检查
+- **累积式修订**: 带历史记录的多轮迭代优化
+- **智能推断**: 合理推断缺失年份，自动标注推断内容
+- **弹性字数**: 建议目标字数，允许±10%自然波动
 
 ## 注意事项
 
-1. **API成本**：10万字生成预计需要50-80次API调用，请注意成本
-2. **生成时间**：全书生成可能需要30分钟到数小时
-3. **事实核查**：AI可能产生幻觉，重要传记请人工复核
-4. **隐私保护**：涉及个人隐私的内容请谨慎处理
+1. **API成本**: 本架构调用LLM次数较多（素材评估+大纲×2+大纲审核+章节×(生成+审核+修订)×轮数），10万字预计需要100-150次调用
+2. **生成时间**: 全书生成可能需要1-3小时（取决于审核迭代次数）
+3. **上下文长度**: 需要支持128K上下文的模型（如kimi-k2-5-long-context）
+4. **事实核查**: 虽然有多重审核，重要传记仍建议人工复核
+5. **隐私保护**: 涉及个人隐私的内容请谨慎处理
 
 ## License
 
