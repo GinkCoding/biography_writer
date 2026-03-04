@@ -98,16 +98,53 @@ class ContinuityChecker:
         self.llm = llm
         self.facts_db = facts_db
 
-    async def review(self, content: str, chapter_context: Any, previous_summaries: List[str]) -> DimensionReview:
+    async def review(self, content: str, chapter_context: Any, previous_summaries: List[str],
+                     chapter_num: int = 0, facts_db: Any = None) -> DimensionReview:
         """
         审核章节内部和与前一章的连贯性
+
+        Args:
+            content: 章节内容
+            chapter_context: 章节大纲信息
+            previous_summaries: 前序章节摘要
+            chapter_num: 当前章节编号
+            facts_db: 事实数据库（检查人物状态）
         """
         prev_text = "\n".join(previous_summaries) if previous_summaries else "本章为第一章"
+
+        # 检查人物可用性（如果facts_db提供）
+        person_availability_issues = []
+        if facts_db and chapter_num > 0:
+            # 从内容中提取可能的人名（简单规则）
+            import re
+            potential_names = set(re.findall(r'[\u4e00-\u9fa5]{2,4}', content))
+            for name in potential_names:
+                if name in facts_db.persons:
+                    check = facts_db.check_person_available(name, chapter_num)
+                    if not check["available"]:
+                        person_availability_issues.append({
+                            "type": "logic_error",
+                            "location": "全文",
+                            "description": check["reason"],
+                            "severity": "critical"
+                        })
+
+        # 获取人物状态信息
+        person_status_info = ""
+        if facts_db and facts_db.persons:
+            person_status_info = "\n【已记录人物状态】\n"
+            for name, person in facts_db.persons.items():
+                if person.status != "active":
+                    person_status_info += f"  - {name}: {person.status}"
+                    if person.status_chapter:
+                        person_status_info += f" (第{person.status_chapter}章)"
+                    person_status_info += "\n"
 
         prompt = f"""你是一位专业的叙事连贯性编辑。请审核以下章节的连贯性。
 
 【前序章节摘要】
 {prev_text}
+{person_status_info}
 
 【当前章节】
 {content}
@@ -116,14 +153,19 @@ class ContinuityChecker:
 1. 章间衔接：
    - 当前章节开头是否自然承接前序章节
    - 时间线是否连续（或合理跳跃）
-   - 人物状态是否一致
+   - 人物状态是否一致（特别注意：已去世/离开人物不应再次出现）
 
 2. 章内连贯：
    - 时间线是否清晰（无混乱的时间跳跃）
    - 段落间逻辑是否顺畅
    - 新出现的人物/地点是否有交代
 
-3. 伏笔与呼应：
+3. 严重逻辑错误检查（必须标记为critical）：
+   - 已去世人物再次活动或对话
+   - 已断绝关系的人物如无其事地出现
+   - 时间线严重矛盾（如年龄倒退）
+
+4. 伏笔与呼应：
    - 前序章节的伏笔是否有所回应
    - 本章设置的伏笔是否自然
 
@@ -133,6 +175,12 @@ JSON格式：
     "passed": true,
     "issues": [
         {{
+            "type": "logic_error",
+            "location": "第3段",
+            "description": "父亲在第1章已去世，但本段描写'父亲摸着他的头'",
+            "severity": "critical"
+        }},
+        {{
             "type": "timeline_gap",
             "location": "第2节",
             "description": "从1985年直接跳到1988年，缺少3年过渡",
@@ -141,7 +189,11 @@ JSON格式：
     ],
     "score": 90,
     "suggestions": ["建议补充1986-1987年的过渡段落"]
-}}"""
+}}
+
+注意：
+- severity为critical的问题必须修复，否则传记存在严重逻辑错误
+- 如果发现已去世/离开人物再次出现，必须是critical级别"""
 
         try:
             response = await self.llm.complete(

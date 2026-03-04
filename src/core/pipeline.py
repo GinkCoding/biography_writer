@@ -108,7 +108,12 @@ class BiographyPipeline:
         """
         material_text = state.material_path.read_text(encoding='utf-8')
 
-        prompt = f"""你是一位资深的传记编辑和写作顾问。请对以下采访素材进行全面评估，判断是否足以支撑一本{state.target_words}字的传记。
+        target_words = state.target_words
+        # 计算合理范围（目标字数的±10%）
+        min_words = int(target_words * 0.9)
+        max_words = int(target_words * 1.1)
+
+        prompt = f"""你是一位资深的传记编辑和写作顾问。请对以下采访素材进行全面评估，判断是否足以支撑一本约{target_words // 10000}万字的传记（合理范围：{min_words}-{max_words}字）。
 
 【完整采访素材】
 {material_text}
@@ -121,11 +126,11 @@ class BiographyPipeline:
    - 人物关系复杂度
    - 情感深度（是否有内心独白、重大转折等）
 
-2. 判断能否支撑{state.target_words}字：
+2. 判断能否支撑约{target_words}字（允许±10%浮动，即{min_words}-{max_words}字）：
    - 素材本身可支撑多少字（严格基于事实）
    - 通过合理扩写（细节描写）可扩展到多少字
    - 通过合理推断（填补空档年份）可再扩展到多少字
-   - 是否建议调整目标字数
+   - 是否建议调整目标字数（建议在合理范围内）
 
 3. 制定扩写策略：
    - 哪些事件需要重度扩写（增加场景、对话、心理描写）
@@ -236,8 +241,10 @@ class BiographyPipeline:
         prompt = f"""你是一位专业的传记作家和图书策划人。请基于以下采访素材和评估报告，设计一本传记的详细大纲。
 
 【目标】
-- 总字数: {state.target_words}字
+- 总字数: 约{state.target_words // 10000}万字（合理范围：{int(state.target_words * 0.9)}-{int(state.target_words * 1.1)}字，允许±10%浮动）
 - 章节数: 建议{evaluation.chapter_suggestion.get('recommended_chapters', 5)}章
+
+重要：字数是参考值，不必严格精确。重点是内容充实、叙事完整。
 
 【采访素材】
 {material[:8000]}...
@@ -507,7 +514,7 @@ JSON格式：
 【本章规划】
 章节: {chapter.title}
 时间跨度: {chapter.time_range}
-目标字数: {chapter.target_words}字
+目标字数: 约{chapter.target_words}字（参考值，允许±10%浮动，重点是内容充实）
 
 【小节规划】
 {sections_plan}
@@ -563,7 +570,9 @@ JSON格式：
         # 并行执行4个审核
         chapter_num = chapter.order if hasattr(chapter, 'order') else 0
         fact_task = self.fact_checker.review(content, material, chapter)
-        continuity_task = self.continuity_checker.review(content, chapter, previous_summaries)
+        continuity_task = self.continuity_checker.review(
+            content, chapter, previous_summaries, chapter_num=chapter_num, facts_db=self.facts_db
+        )
         repetition_task = self.repetition_checker.review(content, chapter_num=chapter_num)
         literary_task = self.literary_checker.review(content, chapter)
 
@@ -671,10 +680,11 @@ JSON格式：
 
     def _make_chapter_header(self, chapter: ChapterOutline, history: List[Dict]) -> str:
         """生成章节头部信息"""
+        actual_words = len(history[-1]['content']) if history else 0
         header = f"""{chapter.title}
 时间跨度: {chapter.time_range}
-目标字数: {chapter.target_words}字
-实际字数: {len(history[-1]['content']) if history else '待定'}
+目标字数: 约{chapter.target_words}字（参考值，允许±10%浮动）
+实际字数: 约{actual_words}字
 修订轮次: {len(history)}轮
 
 小节规划:
@@ -725,6 +735,9 @@ JSON格式：
                     chapter=chapter_num
                 )
 
+        # 检测人物状态变化（去世、离开等）
+        self._detect_person_status_changes(content, chapter_num)
+
         # 从内容中提取地点
         location_patterns = ['市', '省', '县', '镇', '村']
         for pattern in location_patterns:
@@ -737,6 +750,54 @@ JSON格式：
 
         # 保存更新
         self.facts_db.save()
+
+    def _detect_person_status_changes(self, content: str, chapter_num: int):
+        """
+        检测人物状态变化（去世、离开等）
+
+        通过关键词匹配识别人物状态变化
+        """
+        # 去世相关关键词
+        death_keywords = ['去世', '死亡', '病逝', '遇难', '牺牲', '过世', '离世', '辞世']
+        # 离开相关关键词
+        departure_keywords = ['离开', '出走', '断绝关系', '断绝父子关系', '断绝母女关系',
+                              '脱离关系', '一刀两断', '不再来往']
+
+        for person_name in self.facts_db.persons:
+            # 检查该人物是否在内容中
+            if person_name not in content:
+                continue
+
+            # 找到人物在内容中的位置
+            for match in re.finditer(person_name, content):
+                # 获取上下文（前后100字符）
+                start = max(0, match.start() - 100)
+                end = min(len(content), match.end() + 100)
+                context = content[start:end]
+
+                # 检查去世关键词
+                for keyword in death_keywords:
+                    if keyword in context:
+                        self.facts_db.update_person_status(
+                            name=person_name,
+                            status="deceased",
+                            chapter=chapter_num,
+                            description=f"{keyword}"
+                        )
+                        logger.info(f"   记录人物状态: {person_name} 于第{chapter_num}章 {keyword}")
+                        break
+
+                # 检查离开关键词
+                for keyword in departure_keywords:
+                    if keyword in context:
+                        self.facts_db.update_person_status(
+                            name=person_name,
+                            status="departed",
+                            chapter=chapter_num,
+                            description=f"{keyword}"
+                        )
+                        logger.info(f"   记录人物状态: {person_name} 于第{chapter_num}章 {keyword}")
+                        break
 
     async def _assemble_final_book(self, state: PipelineState) -> Path:
         """Phase 7: 终审与组装"""

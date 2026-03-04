@@ -17,6 +17,9 @@ class Person:
     relationship: str  # 与传主关系
     first_appearance: int  # 首次出场章节
     description: str = ""  # 人物描述
+    status: str = "active"  # 状态: active(活跃), deceased(已故), departed(离开/断绝关系)
+    status_chapter: Optional[int] = None  # 状态变更章节
+    status_description: str = ""  # 状态变更说明（如"因车祸去世"、"断绝父子关系"）
 
 
 @dataclass
@@ -136,6 +139,49 @@ class FactsDatabase:
                 description=description
             )
             self.save()
+
+    def update_person_status(self, name: str, status: str, chapter: int, description: str = ""):
+        """
+        更新人物状态
+
+        Args:
+            name: 人物姓名
+            status: 新状态 (active/deceased/departed)
+            chapter: 状态变更章节
+            description: 状态变更说明
+        """
+        if name in self.persons:
+            person = self.persons[name]
+            person.status = status
+            person.status_chapter = chapter
+            person.status_description = description
+            self.save()
+
+    def check_person_available(self, name: str, chapter: int) -> Dict:
+        """
+        检查某章节中人物是否可用（未去世/离开）
+
+        Returns:
+            {
+                "available": bool,
+                "reason": str  # 如果不可用，说明原因
+            }
+        """
+        if name not in self.persons:
+            return {"available": True, "reason": ""}  # 新人物默认可用
+
+        person = self.persons[name]
+
+        # 如果人物在第X章去世/离开，在第X章及之后不可用
+        if person.status in ["deceased", "departed"]:
+            if person.status_chapter and chapter >= person.status_chapter:
+                return {
+                    "available": False,
+                    "reason": f"'{name}'已在第{person.status_chapter}章{person.status_description}，"
+                              f"不应在第{chapter}章再次出现"
+                }
+
+        return {"available": True, "reason": ""}
 
     def add_event(self, name: str, year: Optional[int], location: str, chapter: int,
                   month: Optional[int] = None, description: str = ""):
@@ -266,7 +312,14 @@ class FactsDatabase:
 
         lines.append(f"\n人物清单（{len(self.persons)}人）:")
         for name, person in self.persons.items():
-            lines.append(f"  - {name}: {person.relationship} (第{person.first_appearance}章出场)")
+            status_str = ""
+            if person.status == "deceased":
+                status_str = f" [已故，第{person.status_chapter}章]"
+            elif person.status == "departed":
+                status_str = f" [已离开，第{person.status_chapter}章]"
+            lines.append(f"  - {name}: {person.relationship} (第{person.first_appearance}章出场){status_str}")
+            if person.status_description:
+                lines.append(f"    说明: {person.status_description}")
 
         lines.append(f"\n关键事件（{len(self.events)}件）:")
         for event in self.events[:10]:  # 只显示前10个
