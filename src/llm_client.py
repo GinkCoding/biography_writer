@@ -106,19 +106,28 @@ class LLMClient:
         self,
         awaitable: "asyncio.Future[str]",
         attempt: int,
+        timeout: Optional[int] = None,
     ) -> str:
+        """等待异步请求完成，并输出心跳日志。
+
+        Args:
+            awaitable: 异步任务
+            attempt: 当前尝试次数
+            timeout: 自定义超时时间（秒），None则使用默认值
+        """
+        request_timeout = timeout or self.request_timeout_seconds
         """等待异步请求完成，并输出心跳日志。"""
         task = asyncio.ensure_future(awaitable)
         started = datetime.now()
 
         while True:
             elapsed = (datetime.now() - started).total_seconds()
-            remaining = self.request_timeout_seconds - elapsed
+            remaining = request_timeout - elapsed
             if remaining <= 0:
                 task.cancel()
                 timeout_msg = (
                     f"LLM请求超时: 已等待{int(elapsed)}秒 "
-                    f"(timeout={self.request_timeout_seconds}s, attempt={attempt})"
+                    f"(timeout={request_timeout}s, attempt={attempt})"
                 )
                 self.runtime_monitor.log_event(
                     stage="llm",
@@ -147,6 +156,44 @@ class LLMClient:
         """估算 token 数量"""
         text = "\n".join([m.get("content", "") for m in messages])
         return len(text) // 4  # 粗略估算：4 字符≈1 token
+
+    def _add_thinking_prompt(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """
+        为thinking模式添加系统提示词
+
+        在系统提示词中添加推理要求，促使LLM进行更深入的思考
+        """
+        thinking_instruction = """\n\n=== 思考要求 ===
+在回答之前，请先进行系统性思考：
+1. 分析问题的各个维度和约束条件
+2. 考虑多种可能的方案或角度
+3. 评估每种方案的优缺点
+4. 选择最优方案并详细说明理由
+
+请在回答中体现这个思考过程。"""
+
+        # 复制消息列表避免修改原列表
+        new_messages = messages.copy()
+
+        # 查找系统消息
+        system_found = False
+        for i, msg in enumerate(new_messages):
+            if msg.get("role") == "system":
+                new_messages[i] = {
+                    "role": "system",
+                    "content": msg.get("content", "") + thinking_instruction
+                }
+                system_found = True
+                break
+
+        # 如果没有系统消息，在开头添加
+        if not system_found:
+            new_messages.insert(0, {
+                "role": "system",
+                "content": thinking_instruction.strip()
+            })
+
+        return new_messages
     
     async def _compact_context(self, messages: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
         """
@@ -294,7 +341,9 @@ class LLMClient:
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        stream: bool = False
+        stream: bool = False,
+        thinking: bool = False,
+        timeout: Optional[int] = None
     ) -> str:
         """
         完成一次对话
@@ -304,23 +353,30 @@ class LLMClient:
             temperature: 温度参数
             max_tokens: 最大token数
             stream: 是否流式输出
+            thinking: 是否启用思考模式（在系统提示词中添加推理要求）
+            timeout: 自定义超时时间（秒），None则使用默认值
 
         Returns:
             生成的文本
         """
         temp = temperature or self.temperature
         max_tok = max_tokens or self.max_tokens
-        
+        request_timeout = timeout or self.request_timeout_seconds
+
         # 设置 max_tokens 为模型最大值（如果未指定）
         if max_tokens is None:
             max_tok = 65536  # qwen3.5-plus 最大输出
-        
+
+        # 如果启用thinking模式，在系统提示词中添加推理要求
+        if thinking:
+            messages = self._add_thinking_prompt(messages)
+
         # 检查上下文是否超过 80%
         current_tokens = self._count_tokens(messages)
         if current_tokens > self.max_context_tokens * 0.8:
             logger.info(f"上下文超过 80% ({current_tokens}/{self.max_context_tokens})，自动触发 compact...")
             messages = await self._compact_context(messages) or messages
-        
+
         # 记录到上下文历史
         self.context_history.append({"role": "user", "content": messages[-1].get("content", "") if messages else ""})
         
@@ -371,19 +427,23 @@ class LLMClient:
                             temperature=temp,
                             max_tokens=max_tok,
                             attempt=attempt,
+                            timeout=request_timeout,
                         ),
                         attempt=attempt,
+                        timeout=request_timeout,
                     )
                 else:
                     if self.provider in ["kimi", "openai"]:
                         result = await self._wait_with_heartbeat(
-                            self._call_openai_compatible(messages, temp, max_tok),
+                            self._call_openai_compatible(messages, temp, max_tok, timeout=request_timeout),
                             attempt=attempt,
+                            timeout=request_timeout,
                         )
                     elif self.provider == "zhipuai":
                         result = await self._wait_with_heartbeat(
-                            self._call_zhipuai(messages, temp, max_tok),
+                            self._call_zhipuai(messages, temp, max_tok, timeout=request_timeout),
                             attempt=attempt,
+                            timeout=request_timeout,
                         )
                     else:
                         raise ValueError(f"不支持的提供商: {self.provider}")
@@ -462,6 +522,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         attempt: int,
+        timeout: Optional[int] = None,
     ) -> str:
         """流式收集响应并周期输出接收进度。"""
         stream_iterator = self.complete_stream(
@@ -485,9 +546,9 @@ class LLMClient:
                 metadata={"attempt": attempt},
             )
             if self.provider in ["kimi", "openai"]:
-                return await self._call_openai_compatible(messages, temperature, max_tokens)
+                return await self._call_openai_compatible(messages, temperature, max_tokens, timeout=timeout)
             if self.provider == "zhipuai":
-                return await self._call_zhipuai(messages, temperature, max_tokens)
+                return await self._call_zhipuai(messages, temperature, max_tokens, timeout=timeout)
             raise ValueError(f"不支持的提供商: {self.provider}")
 
         try:
@@ -534,8 +595,18 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float,
-        max_tokens: int
+        max_tokens: int,
+        timeout: Optional[int] = None,
     ) -> str:
+        """调用OpenAI兼容API
+
+        Args:
+            messages: 消息列表
+            temperature: 温度
+            max_tokens: 最大token数
+            timeout: 自定义超时时间（秒）
+        """
+        request_timeout = timeout or self.request_timeout_seconds
         """调用OpenAI兼容API"""
         loop = asyncio.get_running_loop()
 
@@ -549,7 +620,7 @@ class LLMClient:
             try:
                 response = self.client.chat.completions.create(
                     **kwargs,
-                    timeout=self.request_timeout_seconds,
+                    timeout=request_timeout,
                 )
             except TypeError:
                 # 兼容不支持timeout参数的SDK版本
@@ -562,8 +633,18 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float,
-        max_tokens: int
+        max_tokens: int,
+        timeout: Optional[int] = None,
     ) -> str:
+        """调用智谱AI API
+
+        Args:
+            messages: 消息列表
+            temperature: 温度
+            max_tokens: 最大token数
+            timeout: 自定义超时时间（秒）
+        """
+        request_timeout = timeout or self.request_timeout_seconds
         """调用智谱AI API"""
         loop = asyncio.get_running_loop()
 
@@ -577,7 +658,7 @@ class LLMClient:
             try:
                 response = self.client.chat.completions.create(
                     **kwargs,
-                    timeout=self.request_timeout_seconds,
+                    timeout=request_timeout,
                 )
             except TypeError:
                 response = self.client.chat.completions.create(**kwargs)
