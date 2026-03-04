@@ -80,6 +80,11 @@ class LLMClient:
         self.runtime_monitor = get_runtime_monitor(project_root=Path(__file__).parent.parent)
         self._progress_callback: Optional[Callable[[str], None]] = None
         self._stream_available: Optional[bool] = None
+        
+        # 上下文管理：qwen3.5-plus 约 262k context，留余量
+        self.context_tokens = 0
+        self.max_context_tokens = 200000  # 200k 安全阈值
+        self.context_history: List[Dict[str, Any]] = []
 
         # 初始化对应提供商的客户端
         self._init_client()
@@ -138,6 +143,101 @@ class LLMClient:
                     metadata={"attempt": attempt, "elapsed_seconds": int(elapsed)},
                 )
 
+    def _count_tokens(self, messages: List[Dict[str, str]]) -> int:
+        """估算 token 数量"""
+        text = "\n".join([m.get("content", "") for m in messages])
+        return len(text) // 4  # 粗略估算：4 字符≈1 token
+    
+    async def _compact_context(self, messages: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
+        """
+        自动压缩上下文，防止超出 token 限制
+        
+        策略：
+        1. 估算当前 token 数（每 4 字符≈1 token）
+        2. 如果超过阈值（200k tokens），压缩早期消息
+        3. 保留系统消息和最近的消息
+        4. 如果提供 messages 参数，返回压缩后的消息；否则压缩 context_history
+        
+        Args:
+            messages: 消息列表，如果为 None 则压缩 context_history
+            
+        Returns:
+            压缩后的消息列表（如果提供了 messages 参数）
+        """
+        # 如果提供了 messages 参数，压缩它
+        if messages:
+            total_chars = sum(len(m.get("content", "")) for m in messages)
+            estimated_tokens = total_chars // 4
+            
+            # 阈值：200k tokens（qwen3.5-plus 约 262k 上下文窗口）
+            TOKEN_THRESHOLD = 200000
+            
+            if estimated_tokens <= TOKEN_THRESHOLD:
+                return messages
+            
+            logger.info(f"上下文超过阈值 ({estimated_tokens:,} > {TOKEN_THRESHOLD:,})，开始压缩...")
+            
+            # 分离系统消息和普通消息
+            system_messages = [m for m in messages if m.get("role") == "system"]
+            other_messages = [m for m in messages if m.get("role") != "system"]
+            
+            # 如果消息数量少，无法压缩
+            if len(other_messages) <= 2:
+                logger.warning("消息数量过少，无法压缩")
+                return messages
+            
+            # 保留最近的消息（保留最后 2 条）
+            recent_messages = other_messages[-2:]
+            old_messages = other_messages[:-2]
+            
+            # 压缩旧消息：只保留每条的前 200 字符
+            compacted_old_messages = []
+            for msg in old_messages:
+                content = msg.get("content", "")
+                if len(content) > 200:
+                    compacted_old_messages.append({
+                        "role": msg.get("role", "user"),
+                        "content": content[:200] + "...[已压缩]"
+                    })
+                else:
+                    compacted_old_messages.append(msg)
+            
+            # 重组消息
+            compacted_messages = system_messages + compacted_old_messages + recent_messages
+            
+            new_chars = sum(len(m.get("content", "")) for m in compacted_messages)
+            new_tokens = new_chars // 4
+            
+            logger.info(f"上下文压缩完成：{estimated_tokens:,} → {new_tokens:,} tokens")
+            
+            return compacted_messages
+        
+        # 否则压缩 context_history
+        if len(self.context_history) <= 3:
+            return []  # 不需要压缩
+        
+        logger.info(f"开始压缩上下文：{len(self.context_history)} 条 -> 3 条")
+        
+        # 保留系统提示词（第一条）
+        system_message = self.context_history[0] if self.context_history else None
+        
+        # 保留最近 3 轮对话
+        recent_messages = self.context_history[-3:] if len(self.context_history) > 3 else self.context_history
+        
+        # 压缩早期对话为摘要
+        early_messages = self.context_history[1:-3] if len(self.context_history) > 6 else []
+        
+        if early_messages:
+            # 简单摘要：提取关键信息
+            summary_text = f"[早期对话摘要：共{len(early_messages)}条，已压缩]"
+            summary_message = {"role": "system", "content": summary_text}
+            self.context_history = [system_message, summary_message] + recent_messages if system_message else [summary_message] + recent_messages
+        else:
+            self.context_history = [system_message] + recent_messages if system_message else recent_messages
+        
+        logger.info(f"上下文压缩完成：剩余 {len(self.context_history)} 条")
+        return []
+    
     def _init_client(self):
         """初始化具体提供商的客户端"""
         if self.provider == "kimi":
@@ -210,6 +310,20 @@ class LLMClient:
         """
         temp = temperature or self.temperature
         max_tok = max_tokens or self.max_tokens
+        
+        # 设置 max_tokens 为模型最大值（如果未指定）
+        if max_tokens is None:
+            max_tok = 65536  # qwen3.5-plus 最大输出
+        
+        # 检查上下文是否超过 80%
+        current_tokens = self._count_tokens(messages)
+        if current_tokens > self.max_context_tokens * 0.8:
+            logger.info(f"上下文超过 80% ({current_tokens}/{self.max_context_tokens})，自动触发 compact...")
+            messages = await self._compact_context(messages) or messages
+        
+        # 记录到上下文历史
+        self.context_history.append({"role": "user", "content": messages[-1].get("content", "") if messages else ""})
+        
         use_stream = stream or (self.auto_stream_enabled and max_tok >= self.auto_stream_min_tokens)
         if use_stream and self._stream_available is False:
             use_stream = False

@@ -490,6 +490,8 @@ class CharacterInferenceEngine:
                 for trans in transitions:
                     self.inferred_segments.append(InferredSegment(
                         period=trans["period"],
+                        start_year=self._parse_year(trans["period"].split('-')[0]) if '-' in trans["period"] else start_yr,
+                        end_year=self._parse_year(trans["period"].split('-')[1]) if '-' in trans["period"] else None,
                         life_stage="职业阶段",
                         typical_events=[trans.get("occupation", ""), trans.get("possible_change", "")],
                         social_context=trans.get("note", ""),

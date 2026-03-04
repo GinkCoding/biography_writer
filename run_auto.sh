@@ -1,13 +1,13 @@
 #!/bin/bash
-# 自动运行脚本 - 使用 GLM-5 和 SiliconFlow Embedding
+# 自动运行脚本 - 使用 Kimi 和 SiliconFlow Embedding
 
 cd /Users/guoquan/work/Kimi/biography_writer
 
-# 设置 LLM 环境变量 (使用 OpenAI 兼容模式调用 GLM-5)
-export LLM_PROVIDER="openai"
-export OPENAI_API_KEY="sk-sp-53b88c7e79b6406794174741b2b72729"
-export OPENAI_BASE_URL="https://coding.dashscope.aliyuncs.com/v1"
-export OPENAI_MODEL="GLM-5"
+# 设置 LLM 环境变量 (Kimi)
+export LLM_PROVIDER="kimi"
+export KIMI_API_KEY="sk-kimi-hRwTqAfwEJs3H1guXidMeQJY0nOifyfb00wtjYKg1rj8O8JF0QgGf29uLUfq8QYz"
+export KIMI_BASE_URL="https://api.moonshot.cn/v1"
+export KIMI_MODEL="kimi-k2-5-long-context"
 
 # 设置 Embedding 环境变量
 export EMBEDDING_PROVIDER="siliconflow"
@@ -19,7 +19,7 @@ PYTHON_CMD="/usr/bin/arch -arm64 /usr/local/bin/python3"
 
 echo "=== 使用 Apple Silicon (arm64) 模式运行 ==="
 echo "Python 架构: $($PYTHON_CMD -c 'import platform; print(platform.machine())')"
-echo "LLM Provider: $LLM_PROVIDER (GLM-5)"
+echo "LLM Provider: $LLM_PROVIDER ($KIMI_MODEL)"
 echo "Embedding Provider: $EMBEDDING_PROVIDER (Qwen/Qwen3-Embedding-8B)"
 echo ""
 

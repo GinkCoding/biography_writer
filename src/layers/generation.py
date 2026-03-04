@@ -215,8 +215,14 @@ class ContentGenerationEngine:
             },
         )
         
+        section_id = str(context.get("section_id", "")).strip() or generate_id(
+            "section_content",
+            section_title,
+            datetime.now().isoformat(),
+        )
+
         return GeneratedSection(
-            id=generate_id("section_content"),
+            id=section_id,
             chapter_id="",
             title=context.get("section_title", "小节"),
             content=content,
@@ -721,6 +727,7 @@ class IterativeGenerationLayer:
 
             # 提取小节标题和段落级大纲
             context["section_title"] = section_outline.title
+            context["section_id"] = section_outline.id
             if section_outline.paragraphs:
                 context["paragraph_outlines"] = [
                     {
@@ -814,6 +821,9 @@ class IterativeGenerationLayer:
             logger.info(f"DataAgent: 章节数据处理完成 - "
                        f"实体{len(extraction_result.entities_appeared)}个, "
                        f"场景{len(extraction_result.scenes_chunked)}个")
+
+        # 每章生成后自动压缩上下文
+        await self.llm._compact_context()
 
         return generated_chapter
 

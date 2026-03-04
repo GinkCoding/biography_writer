@@ -173,14 +173,17 @@ class OutlineGenerator:
         total_chapters: int,
         material_analysis: Dict
     ) -> List[List]:
-        """增强版事件分配，考虑素材丰富度"""
+        """增强版事件分配，考虑素材丰富度和时间线排序"""
         if not events:
             return [[] for _ in range(total_chapters)]
 
-        # 按时间排序
+        # 1. 按时间严格排序（确保 1965→2026 顺序）
         sorted_events = sorted(events, key=lambda e: e.date or "")
+        
+        # 2. 去重：避免同一主题重复（出生只 1 次，创业只 1-2 次）
+        sorted_events = self._deduplicate_events(sorted_events)
 
-        # 基础分配
+        # 3. 基础分配
         events_per_chapter = len(sorted_events) / total_chapters
 
         distribution = []
@@ -208,6 +211,70 @@ class OutlineGenerator:
             distribution.append(chapter_events)
 
         return distribution
+    
+    def _deduplicate_events(self, events: List[Event]) -> List[Event]:
+        """去重事件，避免同一主题重复出现
+        
+        规则：
+        - 出生事件只保留 1 次
+        - 创业事件只保留 1-2 次
+        - 其他主题事件适当合并
+        """
+        if not events:
+            return events
+        
+        # 按重要性排序，保留最重要的
+        events_by_type = {}
+        for event in events:
+            # 提取事件类型关键词
+            event_type = self._extract_event_type(event)
+            
+            if event_type not in events_by_type:
+                events_by_type[event_type] = []
+            events_by_type[event_type].append(event)
+        
+        # 对每种类型的事件进行去重
+        deduplicated = []
+        for event_type, type_events in events_by_type.items():
+            if event_type in ['出生', '出生事件']:
+                # 出生只保留 1 次（最重要的）
+                type_events.sort(key=lambda e: e.importance, reverse=True)
+                deduplicated.append(type_events[0])
+            elif event_type in ['创业', '创业事件', '铁皮房创业']:
+                # 创业保留 1-2 次
+                type_events.sort(key=lambda e: e.importance, reverse=True)
+                deduplicated.extend(type_events[:2])
+            else:
+                # 其他事件保留所有，但合并相似的
+                deduplicated.extend(type_events[:3])  # 最多保留 3 个相似事件
+        
+        # 重新按时间排序
+        deduplicated.sort(key=lambda e: e.date or "")
+        
+        return deduplicated
+    
+    def _extract_event_type(self, event: Event) -> str:
+        """从事件中提取类型关键词"""
+        title = (event.title or "").lower()
+        desc = (event.description or "").lower()
+        text = title + " " + desc
+        
+        # 关键词匹配
+        if any(kw in text for kw in ['出生', '诞生', '啼哭', '出生地']):
+            return '出生'
+        elif any(kw in text for kw in ['创业', '铁皮房', '注塑机', '宝安']):
+            return '创业'
+        elif any(kw in text for kw in ['偷渡', '香港']):
+            return '偷渡'
+        elif any(kw in text for kw in ['藤编厂', '工作', '打工']):
+            return '工作'
+        elif any(kw in text for kw in ['金融', '危机', '卖车', '卖房']):
+            return '金融危机'
+        elif any(kw in text for kw in ['早茶', '访谈', '采访']):
+            return '访谈'
+        else:
+            return '其他'
+
 
     async def _iterate_outline_optimization(
         self,

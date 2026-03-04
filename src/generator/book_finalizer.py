@@ -18,7 +18,48 @@ from src.utils import count_chinese_words, sanitize_filename
 from src.version_control import GitManager
 
 
-@dataclass
+def clean_text(text):
+    """
+    清理文本中的标注和元数据
+    
+    移除：
+    - 采访素材仅能确认：...
+    - 其余细节尚无直接证据
+    - （来源：素材 X）
+    - 其他标注性文字
+    """
+    if not text:
+        return ""
+    
+    import re
+    # 移除采访素材标注
+    text = re.sub(r'采访素材 [^\n]*', '', text)
+    
+    # 移除来源标注
+    text = re.sub(r'（来源：素材\d+）', '', text)
+    text = re.sub(r'\(来源：素材\d+\)', '', text)
+    
+    # 移除证据不足标注
+    text = re.sub(r'，其余细节尚无直接证据 [。.]?', '', text)
+    text = re.sub(r'其余细节尚无直接证据', '', text)
+    text = re.sub(r'采访素材仅能确认 [^\n]*', '', text)
+    
+    # 移除待核实标注
+    text = re.sub(r'\[待核实\]', '', text)
+    text = re.sub(r'待核实', '', text)
+    
+    # 移除事实核查标注
+    text = re.sub(r'事实核查：[^\n]*', '', text)
+    
+    # 移除多余空格
+    text = re.sub(r'  +', ' ', text)
+    
+    # 移除空行（连续多个换行）
+    text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
+    
+    return text.strip()
+
+
 class ChapterVersion:
     """章节版本信息"""
     chapter_order: int
@@ -309,7 +350,7 @@ class BookFinalizer:
 
             for section in chapter.sections:
                 lines.append(f"\n{section.title}\n")
-                lines.append(section.content)
+                lines.append(clean_text(section.content))
 
             if chapter.transition_paragraph:
                 lines.append(f"\n{chapter.transition_paragraph}")
@@ -360,7 +401,7 @@ class BookFinalizer:
 
             for section in chapter.sections:
                 lines.append(f"## {section.title}\n")
-                lines.append(section.content)
+                lines.append(clean_text(section.content))
                 lines.append("\n")
 
             if chapter.transition_paragraph:
@@ -433,12 +474,27 @@ class BookFinalizer:
         try:
             from src.generator.epub_exporter import export_to_epub
 
+            # 在导出前清理所有章节内容
+            cleaned_book = self._create_cleaned_book_copy(book)
+            
             output_path = self.output_dir / f"{sanitize_filename(book.id)}.epub"
-            return export_to_epub(book, output_path, cover_image)
-
+            return export_to_epub(cleaned_book, output_path, cover_image)
         except ImportError:
             logger.error("EPUB 导出失败: 未安装 ebooklib")
             raise
+
+    def _create_cleaned_book_copy(self, book: BiographyBook) -> BiographyBook:
+        """创建清理后的书籍副本（用于 EPUB 导出）"""
+        import copy
+        cleaned_book = copy.deepcopy(book)
+        
+        # 清理所有章节内容
+        for chapter in cleaned_book.chapters:
+            for section in chapter.sections:
+                section.content = clean_text(section.content)
+        
+        return cleaned_book
+
 
     def export_all_formats(
         self,

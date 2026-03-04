@@ -99,6 +99,7 @@ class BiographyEngine:
             llm=self.llm,
             timeline=self.timeline,
             output_dir=Path(settings.paths.output_dir),
+            vector_store=self.vector_store,
         )
 
     def _build_materials_summary(self, materials: list[Any]) -> list[Dict[str, Any]]:

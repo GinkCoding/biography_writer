@@ -1,0 +1,28 @@
+请修复传记生成系统的以下问题：
+
+## 任务目标
+
+修改代码，使系统能够：
+1. 生成合理的 25 章大纲（按时间线 1965→2026，不重复）
+2. 导出时自动清理标注（采访素材、来源、证据不足等）
+3. 降低事实核查严格度，保留更多内容
+4. 修复字数统计为实际内容长度
+
+## 需要修改的文件
+
+1. src/generator/book_finalizer.py - 添加 clean_text() 函数
+2. src/layers/planning.py - 修复大纲生成逻辑
+3. src/layers/review_output.py - 调整事实核查配置
+4. src/config.py - 调整全局配置
+
+## 详细需求
+
+见文件：/Users/guoquan/work/Kimi/biography_writer/kimi_fix_request.md
+
+## 输出要求
+
+1. 修改后的代码文件
+2. 修复报告（说明修改了什么）
+3. 测试验证结果
+
+请开始修改代码。

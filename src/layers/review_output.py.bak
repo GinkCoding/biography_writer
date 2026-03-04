@@ -2391,7 +2391,7 @@ claim_id: {claim_id}
             ]
 
             # 提高temperature增加多样性
-            rewritten = await self.llm.complete(messages, temperature=0.65, max_tokens=2000)  # 降低幻觉风险)
+            rewritten = await self.llm.complete(messages, temperature=0.65, max_tokens=2000  # 降低幻觉风险)
 
             # 验证重写后的内容
             new_section = GeneratedSection(

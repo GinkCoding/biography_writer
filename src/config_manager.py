@@ -108,7 +108,15 @@ class ConfigManager:
                     description='API基础URL',
                     prompt='API Base URL',
                     default='https://api.moonshot.cn/v1',
-                    env_vars=['KIMI_BASE_URL', 'MOONSHOT_BASE_URL']
+                    env_vars=['KIMI_BASE_URL', 'MOONSHOT_BASE_URL', 'OPENAI_BASE_URL']
+                ),
+                ConfigRequirement(
+                    key='model',
+                    name='Model',
+                    description='模型名称',
+                    prompt='模型名称',
+                    default='kimi-k2-5-long-context',
+                    env_vars=['KIMI_MODEL', 'MOONSHOT_MODEL', 'OPENAI_MODEL']
                 ),
             ],
             'openai': [
