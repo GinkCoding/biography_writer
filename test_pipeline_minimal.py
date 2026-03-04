@@ -237,6 +237,60 @@ async def test_vector_store():
     print("✓ 向量存储测试通过")
 
 
+async def test_person_status_tracking():
+    """测试人物状态追踪（去世/离开后不应再出现）"""
+    print("\n" + "="*60)
+    print("测试5: 人物状态追踪")
+    print("="*60)
+
+    db_path = Path("test_output/test_person_status.json")
+    if db_path.exists():
+        db_path.unlink()
+
+    db = FactsDatabase(db_path)
+
+    # 添加人物
+    db.add_person("父亲", "父亲", chapter=1, description="传主的父亲")
+    db.add_person("母亲", "母亲", chapter=1, description="传主的母亲")
+
+    # 初始状态都应该是 active
+    assert db.persons["父亲"].status == "active"
+    print(f"✓ 父亲初始状态: {db.persons['父亲'].status}")
+
+    # 更新父亲状态为去世（第1章）
+    db.update_person_status("父亲", "deceased", chapter=1, description="因车祸去世")
+
+    # 检查状态
+    assert db.persons["父亲"].status == "deceased"
+    assert db.persons["父亲"].status_chapter == 1
+    print(f"✓ 父亲状态更新: deceased (第1章)")
+
+    # 检查第2章父亲是否可用（应该不可用）
+    check = db.check_person_available("父亲", chapter=2)
+    print(f"✓ 第2章检查父亲可用性: {check}")
+    assert not check["available"]
+    assert "去世" in check["reason"] or "已故" in check["reason"]
+
+    # 检查第1章父亲是否可用（仍然不可用，因为第1章已经去世）
+    check_ch1 = db.check_person_available("父亲", chapter=1)
+    print(f"✓ 第1章检查父亲可用性: {check_ch1}")
+    # 第1章及之后都不可用
+    assert not check_ch1["available"]
+
+    # 母亲状态应该还是 active
+    check_mother = db.check_person_available("母亲", chapter=2)
+    print(f"✓ 第2章检查母亲可用性: {check_mother}")
+    assert check_mother["available"]
+
+    # 更新母亲状态为离开（断绝关系）
+    db.update_person_status("母亲", "departed", chapter=2, description="断绝母子关系")
+    check_mother_after = db.check_person_available("母亲", chapter=3)
+    print(f"✓ 第3章检查母亲可用性（离开后）: {check_mother_after}")
+    assert not check_mother_after["available"]
+
+    print("✓ 人物状态追踪测试通过")
+
+
 async def test_review_report():
     """测试审核报告"""
     print("\n" + "="*60)
@@ -399,6 +453,7 @@ async def main():
         await test_outline_generation()
         await test_facts_database()
         await test_vector_store()
+        await test_person_status_tracking()
         await test_review_report()
         await test_full_pipeline_mock()
 
