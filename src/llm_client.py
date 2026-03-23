@@ -50,11 +50,13 @@ class LLMClient:
                 str(getattr(settings.model, "request_timeout_seconds", 300)),
             )
         )
-        timeout_upper_bound = int(os.getenv("LLM_REQUEST_TIMEOUT_MAX_SECONDS", "300"))
+        timeout_upper_bound = int(os.getenv("LLM_REQUEST_TIMEOUT_MAX_SECONDS", "600"))  # 增加到 600 秒
         self.request_timeout_seconds = min(
             max(10, timeout_upper_bound),
             max(10, configured_timeout),
         )
+        # 流式响应使用更长的超时时间
+        self.stream_request_timeout_seconds = int(os.getenv("LLM_STREAM_REQUEST_TIMEOUT_SECONDS", "1200"))  # 20 分钟
         self.heartbeat_interval_seconds = max(
             3,
             int(
@@ -161,16 +163,20 @@ class LLMClient:
         """
         为thinking模式添加系统提示词
 
-        在系统提示词中添加推理要求，促使LLM进行更深入的思考
+        在系统提示词中添加推理要求，促使LLM进行更深入的思考，
+        但最终只输出答案本身，避免泄露思考过程污染正文或JSON。
         """
         thinking_instruction = """\n\n=== 思考要求 ===
 在回答之前，请先进行系统性思考：
 1. 分析问题的各个维度和约束条件
 2. 考虑多种可能的方案或角度
 3. 评估每种方案的优缺点
-4. 选择最优方案并详细说明理由
+4. 选择最优方案并形成可靠结论
 
-请在回答中体现这个思考过程。"""
+重要：
+1. 思考过程不要直接输出给用户
+2. 只输出最终答案或要求的结构化结果
+3. 如果要求返回JSON、Markdown正文或固定格式，必须严格遵守格式，不要夹带分析过程。"""
 
         # 复制消息列表避免修改原列表
         new_messages = messages.copy()
@@ -421,16 +427,18 @@ class LLMClient:
 
             try:
                 if use_stream:
+                    # 流式响应使用更长的超时时间
+                    stream_timeout = self.stream_request_timeout_seconds
                     result = await self._wait_with_heartbeat(
                         self._collect_stream_response(
                             messages=messages,
                             temperature=temp,
                             max_tokens=max_tok,
                             attempt=attempt,
-                            timeout=request_timeout,
+                            timeout=stream_timeout,
                         ),
                         attempt=attempt,
-                        timeout=request_timeout,
+                        timeout=stream_timeout,
                     )
                 else:
                     if self.provider in ["kimi", "openai"]:
@@ -500,6 +508,19 @@ class LLMClient:
                     message=f"LLM调用失败 (attempt {attempt}): {e}",
                     metadata={"duration_ms": round(duration_ms, 2)},
                 )
+
+                # 检查是否是 token 限制问题
+                if "Token限制导致content为空" in str(e):
+                    # 自动增加 max_tokens 并重试
+                    new_max_tokens = int(max_tok * 2)
+                    max_tok = new_max_tokens
+                    logger.warning(f"检测到token限制，自动增加max_tokens: {max_tok}")
+                    self._notify_progress(
+                        f"Token限制，增加max_tokens到{max_tok}后重试 "
+                        f"(attempt {attempt}/{self.max_attempts})"
+                    )
+                    # 不等待，立即重试
+                    continue
 
                 if attempt >= self.max_attempts:
                     logger.error(f"LLM调用失败: {e}")
@@ -625,7 +646,32 @@ class LLMClient:
             except TypeError:
                 # 兼容不支持timeout参数的SDK版本
                 response = self.client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content
+            
+            # 提取响应内容
+            message = response.choices[0].message
+            content = getattr(message, 'content', None)
+            reasoning_content = getattr(message, 'reasoning_content', None)
+            finish_reason = response.choices[0].finish_reason
+            
+            # 记录调试信息
+            logger.debug(f"LLM响应: content={bool(content)}, reasoning_content={bool(reasoning_content)}, finish_reason={finish_reason}")
+            
+            # 检查是否因为 token 限制导致 content 为空
+            if not content and reasoning_content and finish_reason == 'length':
+                # token 不够，抛出特定错误以便重试
+                error_msg = f"Token限制导致content为空 (max_tokens={max_tokens}, finish_reason=length)"
+                logger.warning(error_msg)
+                raise ValueError(error_msg)
+            
+            # 优先使用 content，如果为空则使用 reasoning_content
+            if content:
+                return content
+            elif reasoning_content:
+                logger.warning("content为空，使用reasoning_content作为响应")
+                return reasoning_content
+            else:
+                logger.error("LLM响应内容为空")
+                raise ValueError("LLM返回空响应")
 
         return await loop.run_in_executor(None, _call)
 
@@ -662,7 +708,32 @@ class LLMClient:
                 )
             except TypeError:
                 response = self.client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content
+            
+            # 提取响应内容
+            message = response.choices[0].message
+            content = getattr(message, 'content', None)
+            reasoning_content = getattr(message, 'reasoning_content', None)
+            finish_reason = response.choices[0].finish_reason
+            
+            # 记录调试信息
+            logger.debug(f"智谱AI响应: content={bool(content)}, reasoning_content={bool(reasoning_content)}, finish_reason={finish_reason}")
+            
+            # 检查是否因为 token 限制导致 content 为空
+            if not content and reasoning_content and finish_reason == 'length':
+                # token 不够，抛出特定错误以便重试
+                error_msg = f"Token限制导致content为空 (max_tokens={max_tokens}, finish_reason=length)"
+                logger.warning(error_msg)
+                raise ValueError(error_msg)
+            
+            # 优先使用 content，如果为空则使用 reasoning_content
+            if content:
+                return content
+            elif reasoning_content:
+                logger.warning("content为空，使用reasoning_content作为响应")
+                return reasoning_content
+            else:
+                logger.error("智谱AI响应内容为空")
+                raise ValueError("智谱AI返回空响应")
 
         return await loop.run_in_executor(None, _call)
 
@@ -688,8 +759,15 @@ class LLMClient:
                     stream=True
                 )
                 for chunk in response:
-                    if chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
+                    delta = chunk.choices[0].delta
+                    # 优先使用 content，如果为空则尝试 reasoning_content
+                    content = getattr(delta, 'content', None)
+                    reasoning_content = getattr(delta, 'reasoning_content', None)
+                    
+                    if content:
+                        yield content
+                    elif reasoning_content:
+                        yield reasoning_content
             elif self.provider == 'zhipuai':
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -699,8 +777,15 @@ class LLMClient:
                     stream=True
                 )
                 for chunk in response:
-                    if chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
+                    delta = chunk.choices[0].delta
+                    # 优先使用 content，如果为空则尝试 reasoning_content
+                    content = getattr(delta, 'content', None)
+                    reasoning_content = getattr(delta, 'reasoning_content', None)
+                    
+                    if content:
+                        yield content
+                    elif reasoning_content:
+                        yield reasoning_content
 
         # 将同步生成器转换为异步生成器
         import threading

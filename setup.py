@@ -80,10 +80,10 @@ def main():
     print("\n" + "=" * 60)
     print("✅ 安装配置完成！")
     print("=" * 60)
-    print("\n您现在可以运行：")
-    print("  python3 generate_book.py")
-    print("\n或查看帮助：")
+    print("\n您现在可以先查看可用命令：")
     print("  python3 -m src --help")
+    print("\n开始初始化项目：")
+    print("  python3 -m src init")
 
     return 0
 

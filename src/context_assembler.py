@@ -23,6 +23,7 @@ from src.models import (
 )
 from src.layers.data_ingestion import VectorStore
 from src.utils import count_chinese_words, truncate_text, estimate_tokens
+from src.chapter_summary import get_summary_generator
 
 
 class ContextLevel(Enum):
@@ -123,6 +124,9 @@ class ProgressiveContextAssembler:
         self._chapter_cache: Dict[str, List[GeneratedSection]] = {}
         self._entity_frequency: Dict[str, int] = {}
         self._risk_signals: List[Dict] = []
+        
+        # 按项目延迟初始化，避免不同书共用同一份梗概缓存
+        self.summary_generator = None
 
     async def assemble_context(
         self,
@@ -150,6 +154,10 @@ class ProgressiveContextAssembler:
         """
         logger.info(f"开始组装上下文 [级别: {level.value}] - {chapter.title}/{section.title}")
 
+        book_id = global_state.get("book_id")
+        if book_id:
+            self.summary_generator = get_summary_generator(self.llm, book_id=book_id)
+
         context = LoadedContext(loaded_level=level)
 
         # L0-L3 都包含的基础上下文
@@ -169,7 +177,7 @@ class ProgressiveContextAssembler:
 
         # L1+ 加载连续性上下文
         context.continuity_context = self._build_continuity_context(
-            previous_section_summary, global_state, level
+            previous_section_summary, global_state, level, current_chapter=chapter
         )
 
         # L2+ 加载扩展上下文
@@ -283,11 +291,11 @@ class ProgressiveContextAssembler:
         if not selected_materials:
             coverage_info["status"] = "严重不足"
             return """=== 相关素材 ===
-【⚠️ 严重警告】当前小节缺乏直接对应的采访素材。请基于已有章节上下文和时代背景进行合理推演，但必须：
-1. 不虚构具体的人名、地名、机构名
-2. 不编造具体的数字和数据
-3. 如需补充细节，使用"据回忆"、"大约是"等模糊表述
-4. 禁止使用"待补充"、"此处需要展开"等占位符
+【提示】当前小节缺乏直接对应的采访素材。请基于已有章节上下文和时代背景做克制推演：
+1. 不虚构关键人名、地名、机构名
+2. 不乱写精确数字和数据
+3. 如需补充细节，可使用“据回忆”“大约”“那几年”这类保守写法
+4. 禁止出现“待补充”“此处需要展开”等占位符
 """, coverage_info
 
         if coverage_info["coverage_ratio"] < 0.4:
@@ -309,7 +317,7 @@ class ProgressiveContextAssembler:
 【素材覆盖率】{coverage_info['status']}（共{len(selected_materials)}条素材，高相关度{high_confidence}条，阈值{adaptive_threshold:.2f}）
 """
 
-        materials_text = "=== 相关素材（必须引用其中的具体细节）===\n" + "\n".join(material_texts) + coverage_hint
+        materials_text = "=== 相关素材（优先吸收其中最有辨识度的细节）===\n" + "\n".join(material_texts) + coverage_hint
 
         return materials_text, coverage_info
 
@@ -383,25 +391,40 @@ class ProgressiveContextAssembler:
         self,
         previous_summary: Optional[str],
         global_state: Dict[str, Any],
-        level: ContextLevel
+        level: ContextLevel,
+        current_chapter: Optional[ChapterOutline] = None
     ) -> str:
-        """构建上下文衔接信息"""
+        """构建上下文衔接信息（集成章节梗概）"""
         parts = ["=== 上下文衔接 ==="]
 
         # 上一节摘要
         if previous_summary:
             parts.append(f"上一节结尾:\n{truncate_text(previous_summary, 200)}")
 
-        # L1+ 加载更多摘要
-        if level.value >= ContextLevel.L1_ESSENTIAL.value:
+        # L1+ 加载章节梗概（使用新的梗概系统）
+        if level.value >= ContextLevel.L1_ESSENTIAL.value and current_chapter and self.summary_generator:
+            chapter_continuity = self.summary_generator.build_continuity_context(
+                current_chapter=current_chapter.order,
+                max_summaries=3
+            )
+            if chapter_continuity:
+                parts.append(chapter_continuity)
+
+            # 回退到旧方法
             summaries = global_state.get("previous_summaries", [])
-            if summaries:
+            if summaries and not chapter_continuity:
                 parts.append(f"前几章脉络:\n" + " → ".join(summaries[-3:]))
 
             frequent_chars = global_state.get("frequent_characters", [])
             if frequent_chars:
                 char_list = ", ".join([f"{name}({count}次)" for name, count in frequent_chars[:5]])
                 parts.append(f"活跃人物: {char_list}")
+
+            hard_facts = global_state.get("hard_facts", [])
+            if hard_facts:
+                parts.append("\n【硬事实守卫 - 这些信息不能漂移】")
+                for fact in hard_facts[:10]:
+                    parts.append(f"  - {fact}")
 
         # L2+ 加载风险信号
         if level.value >= ContextLevel.L2_EXTENDED.value:
@@ -451,16 +474,16 @@ class ProgressiveContextAssembler:
             era_desc = f"{year}年代"
             era_keywords = "请参考历史资料"
 
-        return f"""=== 时代背景（写作时必须融入）===
+        return f"""=== 时代背景（写作时参考融入）===
 时间: {year}年代
 时代特征: {era_desc}
 关键元素: {era_keywords}
 
 【写作要求】
-1. 必须结合当时的社会大环境描述传主的经历
-2. 可提及当时的物价水平、工资标准、流行文化等具体细节
-3. 将个人命运与时代变迁相结合
-4. 禁止使用"中国社会发展的重要时期"等空泛表述
+1. 让时代感自然落在人物处境和生活细节里
+2. 如合适，可提及当时的物价、工资、交通、流行文化等具体背景
+3. 将个人命运与时代变迁关联起来，但不要空喊大词
+4. 避免“中国社会发展的重要时期”这类空泛表述
 """
 
     def _analyze_sensory_details(self, materials_text: str) -> Dict[str, List[str]]:
@@ -582,9 +605,21 @@ class ProgressiveContextAssembler:
         global_state: Dict[str, Any],
         max_count: int = 3
     ) -> List[str]:
-        """加载前章摘要"""
-        summaries = global_state.get("previous_summaries", [])
-        return summaries[-max_count:] if summaries else []
+        """加载前章摘要（使用新的梗概系统）"""
+        # 使用新的梗概生成器获取前一章梗概
+        summaries = []
+        if self.summary_generator:
+            summaries = self.summary_generator.get_previous_summaries(
+                current_chapter=chapter.order,
+                count=max_count
+            )
+        
+        if summaries:
+            return [s.to_prompt_text() for s in summaries]
+        
+        # 回退到旧方法（从global_state加载）
+        old_summaries = global_state.get("previous_summaries", [])
+        return old_summaries[-max_count:] if old_summaries else []
 
     async def _load_all_chapters_content(
         self,

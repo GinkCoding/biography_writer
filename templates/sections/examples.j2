@@ -1,86 +1,56 @@
 {# Few-shot示例片段 #}
-{# 变量: example_category, show_positive, show_negative #}
+{# 用来校正方向，不要求逐句模仿 #}
 
-{% set positive_examples = {
-  "concrete_detail": {
-    "title": "基于具体素材",
-    "content": "1982年春天，陈国伟背着布包走进藤编厂（来源：素材3）。厂门口有棵老榕树，车间里是成捆的藤条和化学药剂的味道。门卫老头翻着登记簿说：'你就是那个手很巧的小子。'",
-    "analysis": "优点：具体时间、地点、对话、气味细节，都有来源支撑"
+{% set positive_examples = [
+  {
+    "title": "具体场景",
+    "content": "1982年春天，陈国伟背着布包走进藤编厂。厂门口有棵老榕树，车间里是成捆藤条和药剂混在一起的味道。门卫老头翻着登记簿，抬头看了他一眼：'你就是那个手很巧的小子？'",
+    "analysis": "时间、地点、气味、动作、对话都落在一个真实场景里"
   },
-  "show_dont_tell": {
-    "title": "有言行支撑的心理",
-    "content": "陈国伟站在厂门口，深吸一口气——那是藤条被水泡发后的清香，混合着汗味和机油味（来源：素材3）。他没有立即进去，而是在榕树下站了几分钟，把布包的带子攥紧了又松开。",
-    "analysis": "优点：通过动作（吸气、攥带子）表现紧张，而非直接说'他很紧张'"
+  {
+    "title": "用动作带出情绪",
+    "content": "他没有立刻进门，而是在榕树下站了几分钟，把布包带子攥紧了又松开，像是在心里把将要说的话先过一遍。",
+    "analysis": "没有直接说紧张，但读者能感觉到那股劲"
   },
-  "era_context": {
-    "title": "时代背景具体化",
-    "content": "1984年，陈国伟第一次离开佛山去广州。那时候广州火车站很乱，他在流花湖那边倒腾服装，从石狮进货。没有营业执照，看到戴红袖箍的来抓，卷起包袱就跑（来源：素材2）。",
-    "analysis": "优点：具体年份、地点、行为细节，而非'改革开放初期'的空泛描述"
-  },
-  "dialogue": {
-    "title": "真实对话",
-    "content": "'这批货不能再等了，'陈国伟把账本拍在桌上，'纺织厂那边已经催了三次，再拖下去违约金就是三千块。'他说这话时，手指一直在敲桌面，眼睛盯着窗外的梧桐树。",
-    "analysis": "优点：具体对话内容，配合动作细节，展现人物焦虑"
-  },
-  "sensory": {
-    "title": "感官描写",
-    "content": "车间里的温度至少有三十五度，电风扇吹出来的都是热风。陈国伟的衬衫后背已经湿透，贴在皮肤上。机器的轰鸣声震得耳朵发麻，空气中弥漫着机油和金属摩擦的焦糊味。",
-    "analysis": "优点：温度、触觉、听觉、嗅觉多感官描写，场景立体可感"
+  {
+    "title": "时代落地",
+    "content": "1984年，他第一次去广州。那时候车站乱，身上带着货的人都走得快，说话也压着嗓子，生怕多耽误一刻，手里的买卖就黄了。",
+    "analysis": "不是空喊时代背景，而是把时代感落在人的举动和空气里"
   }
-} %}
+] %}
 
-{% set negative_examples = {
-  "cliche_imagery": {
-    "title": "套路化意象",
-    "content": "晨光透过窗户洒进来，尘埃在光柱中飞舞。陈国伟端起茶杯，凉茶早已凉透，苦涩中带着回甘。",
-    "analysis": "问题：'尘埃光柱'、'凉茶苦甘'是AI常见套路，无具体来源"
+{% set negative_examples = [
+  {
+    "title": "空泛形容",
+    "content": "那是一个风云变幻、波澜壮阔的年代，对他的人生产生了深刻影响。",
+    "analysis": "只有大词，没有人、事、地点和现场感"
   },
-  "emotion_label": {
-    "title": "情感标签",
-    "content": "得知这个消息，陈国伟陷入了沉思，心中充满了复杂的情绪。",
-    "analysis": "问题：'陷入沉思'、'充满情绪'是空洞标签，没有具体言行支撑"
+  {
+    "title": "套路化抒情",
+    "content": "命运的齿轮自此转动，更大的挑战正在前方等待着他。",
+    "analysis": "像万能旁白，不像这一个人的真实人生"
   },
-  "vague_description": {
-    "title": "空泛表述",
-    "content": "那是一个风云变幻、波澜壮阔的特殊年代，对陈国伟的人生产生了深刻影响。",
-    "analysis": "问题：没有具体时间地点，全是空泛形容词"
-  },
-  "placeholder": {
-    "title": "占位符",
-    "content": "（此处需要补充更多细节，待后续完善）",
-    "analysis": "问题：明显的AI占位符，必须删除"
-  },
-  "suspense_cliche": {
-    "title": "虚假悬念",
-    "content": "然而，更大的挑战正在等待着他。命运的齿轮已经开始转动，暴风雨前的宁静即将被打破。",
-    "analysis": "问题：空洞的悬念套路，没有具体内容支撑"
+  {
+    "title": "空心情绪标签",
+    "content": "听到这个消息，他陷入了沉思，心中充满了复杂的情绪。",
+    "analysis": "直接贴情绪标签，没有动作、神态或语境支撑"
   }
-} %}
+] %}
 
-=== 正反面示例（必须遵循） ===
+=== 参考示例（理解方向，不要照抄） ===
 
-{% if show_negative | default(true) %}
-【反面示例 ❌ 必须避免】
-
-{% for key, example in negative_examples.items() %}
-❌ 例{{ loop.index }} - {{ example.title }}：
+【尽量靠近的写法】
+{% for example in positive_examples %}
+✅ {{ loop.index }}. {{ example.title }}
 "{{ example.content }}"
 → {{ example.analysis }}
 
 {% endfor %}
-{% endif %}
 
-{% if show_positive | default(true) %}
-【正面示例 ✅ 应该模仿】
-
-{% for key, example in positive_examples.items() %}
-✅ 例{{ loop.index }} - {{ example.title }}：
+【尽量避开的写法】
+{% for example in negative_examples %}
+❌ {{ loop.index }}. {{ example.title }}
 "{{ example.content }}"
 → {{ example.analysis }}
 
 {% endfor %}
-{% endif %}
-
-{% if example_category %}
-【{{ example_category }}专项示例】
-{% endif %}

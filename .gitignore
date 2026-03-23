@@ -1,22 +1,16 @@
-# Python
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Runtime artifacts
 .cache/
 .vector_db/
 .observability/
 output/
-.venv/
 *.log
-
-# Secrets / local envs
 .env
 .env.*
 !.env.example
-
-# OS
 .DS_Store

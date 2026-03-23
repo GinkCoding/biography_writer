@@ -545,13 +545,13 @@ class SetupWizard:
 
         # 完成
         self._print_header("✨ 配置完成！")
-        self._print("您现在可以运行以下命令开始生成传记：")
+        self._print("您现在可以运行以下命令开始使用：")
         self._print("")
-        self._print("  python3 generate_book.py", style="bold green" if RICH_AVAILABLE else "")
+        self._print("  python3 -m src --help", style="bold green" if RICH_AVAILABLE else "")
         self._print("")
         self._print("或：")
         self._print("")
-        self._print("  python3 -m src", style="bold green" if RICH_AVAILABLE else "")
+        self._print("  python3 -m src init", style="bold green" if RICH_AVAILABLE else "")
 
         return True
 

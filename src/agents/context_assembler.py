@@ -117,6 +117,7 @@ class ContextContract:
     style_guide: StyleGuide = field(default_factory=StyleGuide)
     continuity: ContinuityInfo = field(default_factory=ContinuityInfo)
     quality_strategy: QualityStrategy = field(default_factory=QualityStrategy)
+    hard_facts: List[str] = field(default_factory=list)
 
     # 元数据
     chapter_id: str = ""
@@ -157,6 +158,10 @@ class ContextContract:
             parts.append(f"必须完成: {'; '.join(self.chapter_task.must_complete)}")
         if self.chapter_task.must_avoid:
             parts.append(f"绝对不能: {'; '.join(self.chapter_task.must_avoid)}")
+        if self.hard_facts:
+            parts.append("硬事实守卫:")
+            for fact in self.hard_facts[:10]:
+                parts.append(f"- {fact}")
         return "\n".join(parts)
 
     def _build_section_section(self) -> str:
@@ -428,6 +433,7 @@ class ContextAgent:
         contract.quality_strategy = self._build_quality_strategy(
             section, chapter, global_state
         )
+        contract.hard_facts = self._build_hard_facts(global_state)
 
         logger.info(f"ContextAgent: 创作任务书组装完成 - {chapter.title}")
         return contract
@@ -625,8 +631,9 @@ class ContextAgent:
         # 本章建议
         guide.chapter_suggestions = [
             f"保持{style.value}风格的一致性",
-            "每300字包含至少1个具体时间、地点或细节",
+            "让关键细节自然落在叙事里，不必机械堆砌信息点",
             "通过具体行为展现人物心理，避免空洞标签",
+            "句子和段落保持流动感，不要写成说明书",
         ]
 
         return guide
@@ -704,6 +711,28 @@ class ContextAgent:
         ]
 
         return strategy
+
+    def _build_hard_facts(self, global_state: EnhancedGlobalState) -> List[str]:
+        """只提取少量不能漂移的硬事实，给模型稳定锚点，不干涉文风发挥。"""
+        facts: List[str] = []
+        subject = global_state.subject_profile
+        if subject:
+            if subject.birth_date:
+                facts.append(f"{subject.name}出生时间：{subject.birth_date}")
+            if subject.birth_place:
+                facts.append(f"{subject.name}出生地：{subject.birth_place}")
+            for member, relation in list(subject.family_dynamics.items())[:6]:
+                facts.append(f"家庭关系：{member} -> {relation}")
+            for rel in subject.relationships[:8]:
+                desc = f"关系：{rel.target} 是 {subject.name} 的{rel.relation_type}"
+                if rel.description:
+                    desc += f"；{rel.description}"
+                facts.append(desc)
+
+        for name in list(global_state.character_name_mappings.keys())[:8]:
+            facts.append(f"已建立人物名：{name}；若后文继续出场，保持同名")
+
+        return facts
 
     async def retrieve_materials(
         self,

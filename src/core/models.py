@@ -304,6 +304,37 @@ class RevisionHistory:
 
 
 @dataclass
+class IterativeReviewConfig:
+    """迭代审核配置"""
+    enabled: bool = True
+    max_rounds: int = 5
+    pass_threshold: int = 90
+    thinking_enabled: bool = True  # 评审阶段是否启用thinking
+    # 上下文动态加载策略
+    context_strategy: Dict = field(default_factory=lambda: {
+        "early_chapters": {  # 第1-3章
+            "range": [1, 3],
+            "previous_count": 2
+        },
+        "middle_chapters": {  # 第4-6章
+            "range": [4, 6],
+            "previous_count": 3
+        },
+        "late_chapters": {  # 第7章及以后
+            "range": [7, 999],
+            "previous_count": 5
+        }
+    })
+
+    def get_previous_count(self, chapter_num: int) -> int:
+        """根据章节编号获取前文章数"""
+        for strategy_name, strategy in self.context_strategy.items():
+            if strategy["range"][0] <= chapter_num <= strategy["range"][1]:
+                return strategy["previous_count"]
+        return 3  # 默认值
+
+
+@dataclass
 class GenerationConfig:
     """生成配置"""
     max_revision_rounds: int = 5
@@ -314,3 +345,4 @@ class GenerationConfig:
     timeout_chapter: int = 900
     timeout_review: int = 60
     enable_competition: bool = True
+    iterative_review: IterativeReviewConfig = field(default_factory=IterativeReviewConfig)

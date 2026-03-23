@@ -125,7 +125,7 @@ class PersonRelationshipAnalyzer:
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=1500,
+                max_tokens=16384,
                 timeout=120
             )
 
@@ -227,7 +227,7 @@ JSON数组，每个问题一个对象：
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=2000,
+                max_tokens=16384,
                 timeout=120
             )
 

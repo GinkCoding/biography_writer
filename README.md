@@ -28,7 +28,7 @@
 ### 1. 安装依赖
 
 ```bash
-cd /Users/guoquan/work/Kimi/biography_writer
+cd /Users/guoquan/work/biography_writer
 pip install -r requirements.txt
 ```
 
@@ -47,17 +47,46 @@ cp .env.example .env
 ### 3. 运行流水线
 
 ```bash
-# 基本用法
-python run_pipeline.py /path/to/interview.txt
+# 查看命令
+python -m src --help
 
-# 指定输出目录和目标字数
-python run_pipeline.py /path/to/interview.txt --output ./output --target-words 100000
+# 查看可用风格
+python -m src styles
 
-# 使用测试模式（验证流程，不实际调用LLM）
-python test_pipeline_minimal.py
+# 初始化项目（采访文件放在 interviews/ 目录下）
+# 可选风格：literary / documentary / investigative / memoir / inspirational
+python -m src init 陈国伟采访.txt --subject 陈国伟 --words 100000 --style literary
+
+# 开始生成整本
+python -m src write
+
+# 只生成某一章
+python -m src write --chapter 3
 ```
 
-### 4. 查看结果
+### 4. 选择生成风格
+
+项目的写作风格在 `init` 时指定，常用风格如下：
+
+- `literary`：文学感更强，画面、情绪和节奏更突出
+- `documentary`：更稳、更纪实，信息更清楚
+- `investigative`：更强调因果、线索和问题意识
+- `memoir`：更像回望人生，语气更贴近回忆
+- `inspirational`：更强调成长、转折和鼓舞感
+
+示例：
+
+```bash
+python -m src init 陈国伟采访.txt --subject 陈国伟 --style literary
+python -m src init 陈国伟采访.txt --subject 陈国伟 --style documentary
+```
+
+注意：
+- 风格是在项目初始化时写入项目状态的
+- 已经创建好的项目会沿用原来的风格
+- 如果想换风格，最稳的做法是重新初始化一个新项目再生成
+
+### 5. 查看结果
 
 ```bash
 # 生成的传记位于
@@ -142,7 +171,7 @@ generation:
   target_length: 10000      # 目标字数（默认1万字，可调整到10万）
   total_chapters: 25        # 章节数
   sections_per_chapter: 4   # 每章节数
-  style: literary           # 风格
+  style: literary           # 默认风格（新项目建议优先在 init 时用 --style 指定）
 ```
 
 ## 与旧版架构的区别
@@ -161,12 +190,12 @@ generation:
 
 ```
 biography_writer/
-├── run_pipeline.py              # 主入口脚本
-├── test_pipeline_minimal.py     # 最小化测试
+├── main.py                      # 项目命令入口
 ├── config/
 │   ├── settings.yaml            # 模型配置
 │   └── styles.yaml              # 写作风格
 ├── src/
+│   ├── cli.py                   # 主命令行入口
 │   ├── core/
 │   │   ├── pipeline.py          # 7阶段流水线主逻辑
 │   │   ├── agents.py            # 4个审核Agent

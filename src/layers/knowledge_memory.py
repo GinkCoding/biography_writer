@@ -578,6 +578,7 @@ class GlobalStateManager:
     def get_context_for_generation(self) -> Dict[str, Any]:
         """获取生成所需的上下文信息"""
         context = {
+            "book_id": self.book_id,
             "subject_name": self.state.subject_profile.name if self.state.subject_profile else "",
             "subject_age": self.state.current_subject_age,
             "subject_mood": self.state.current_subject_mood,
@@ -615,6 +616,26 @@ class GlobalStateManager:
                     ]
 
         return context
+
+    def get_hard_fact_guard(self) -> List[str]:
+        """提取少量必须保持稳定的硬事实，避免名字和关键关系漂移。"""
+        facts: List[str] = []
+        profile = self.state.subject_profile
+        if profile:
+            if profile.birth_date:
+                facts.append(f"{profile.name}出生时间：{profile.birth_date}")
+            if profile.birth_place:
+                facts.append(f"{profile.name}出生地：{profile.birth_place}")
+            for member, relation in list(profile.family_dynamics.items())[:6]:
+                facts.append(f"家庭关系：{member} -> {relation}")
+            for rel in profile.relationships[:8]:
+                line = f"关系：{rel.target} 是 {profile.name} 的{rel.relation_type}"
+                if rel.description:
+                    line += f"；{rel.description}"
+                facts.append(line)
+            for name, mapping in list(self.state.character_name_mappings.items())[:8]:
+                facts.append(f"已建立人物称谓：{name}；后文保持同名，不要无故改名")
+        return facts
 
     def save(self):
         """保存状态到文件"""

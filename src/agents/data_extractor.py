@@ -295,6 +295,13 @@ class DataAgent:
             if entity.entity_type == "角色":
                 current_count = global_state.characters_mentioned.get(entity.name, 0)
                 global_state.characters_mentioned[entity.name] = current_count + len(entity.mentions)
+                if entity.name != (global_state.subject_profile.name if global_state.subject_profile else ""):
+                    global_state.register_character(entity.name, aliases=entity.mentions[:3])
+
+        # 1.5 注册新识别的人物，尽早建立名称锚点
+        for entity in result.entities_new:
+            if entity.entity_type == "角色":
+                global_state.register_character(entity.name)
 
         # 2. 更新人物快照
         for entity in result.entities_appeared:

@@ -18,7 +18,7 @@ class ModelConfig(BaseSettings):
     api_key: str = ""
     base_url: Optional[str] = "https://coding.dashscope.aliyuncs.com/v1"
     model: str = "qwen3.5-plus"
-    max_tokens: int = 65536  # qwen3.5-plus 最大输出 token 数
+    max_tokens: int = 16384  # GLM-5 最大输出 token 数
     temperature: float = 0.7
     top_p: float = 0.9
     request_timeout_seconds: int = 5400  # 90 分钟，支持长章节生成

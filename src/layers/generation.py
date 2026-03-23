@@ -34,6 +34,7 @@ from src.prompt_manager import PromptManager, get_prompt_manager
 # 双Agent架构导入
 from src.agents import ContextAgent, ContextContract, DataAgent, ExtractionResult
 from src.observability.runtime_monitor import get_runtime_monitor
+from src.chapter_summary import get_summary_generator, ChapterSummaryGenerator
 
 
 # AI占位符检测模式
@@ -247,7 +248,7 @@ class ContentGenerationEngine:
                 candidate = await self.llm.complete(
                     messages,
                     temperature=0.7,
-                    max_tokens=min(4000, max(1200, target_words * 2)),
+                    max_tokens=16384,
                     stream=True,
                 )
             else:
@@ -317,7 +318,7 @@ class ContentGenerationEngine:
         rewritten = await self.llm.complete(
             messages,
             temperature=0.45,
-            max_tokens=min(4000, max(1200, target_words * 2)),
+            max_tokens=16384,
             stream=True,
         )
         return rewritten.strip()
@@ -369,35 +370,21 @@ class ContentGenerationEngine:
 
         return f"""你是一位专业的传记作家。{style_desc}
 
-=== 角色锚定 ===
-你是一位对事实极度苛求的非虚构传记作家。你的每一句描写都必须能指向采访素材中的具体来源。
-你憎恨空洞的文学修饰，认为那是对传主经历的不尊重。
+=== 角色定位 ===
+你的任务是在事实边界内，把人物、关系、处境和时代写得可信、通顺、可读。
+能确认的地方写实写稳，不能确认的地方宁可收一点，也不要硬补。
 
-=== 强制要求（违反将导致内容被废弃） ===
-1. 【素材引用】必须使用提供的采访素材中的具体细节：人名、地名、时间、对话、数字
-2. 【来源标注】引用采访内容时，在括号中标注来源，如（来源：素材1）
-3. 【禁止虚构】不得编造未在素材中出现的具体人物、事件、地点
-4. 【时代锚定】必须明确时间点，结合当时的社会背景
-5. 【具体信息密度】每300字必须包含至少1个具体时间、地点、数字或人物对话
+=== 底线要求 ===
+1. 人名、关系、时间、地点和事件先后不能与素材或前文冲突
+2. 重大事件不能凭空编造
+3. 优先吸收素材里的具体细节，但不要把“来源：素材X”写进正文
+4. 正文里不能出现占位符、提纲语句、编辑批注或AI口吻
 
-=== 禁止事项（绝对禁止出现） ===
-1. 【占位符】"待补充"、"待完善"、"此处需要展开"、"鉴于...尚待补充"等
-2. 【模板套话】"尘埃在光柱中飞舞"、"苦涩中带着回甘"、"命运的齿轮"等
-3. 【空泛表述】"中国社会发展的重要时期"、"那是一个特殊的年代"等
-4. 【AI声明】"我为您撰写"、"这是一个通用模板"等AI身份暴露语句
-5. 【悬念套路】"暴风雨前的宁静"、"真相伺机而动"、"更大的挑战在等待"等
-6. 【心理标签】"陷入了沉思"、"百感交集"、"心中充满"、"倍感欣慰"等无具体言行支撑的情感标签
-7. 【时间套路】"时光荏苒"、"转眼间"、"岁月如梭"、"白驹过隙"等
-8. 【场景套路】"月光如水"、"微风轻拂"、"阳光正好"、"点了一根烟"、"望着远方"等
-
-=== 写作要求 ===
-1. 基于提供的素材进行扩写，不要脱离素材随意发挥
-2. 注重细节描写：场景、动作、对话、心理活动
-3. 适当运用感官描写（视觉、听觉、嗅觉等）
-4. 时间线和人物关系必须与上下文保持一致
-5. 情感表达要符合指定的情感基调
-6. 使用中文写作，语言流畅自然
-7. 章节结尾应自然收束，不要强行制造悬念
+=== 写法建议 ===
+1. 尽量用场景、动作、对话和结果把人物立起来
+2. 文学性可以有，但不要为了漂亮而牺牲清楚和可信
+3. 段落过渡自然，逻辑清晰，结尾自然收束
+4. 素材不足时可克制留白或使用保守措辞，不要乱补细节
 """
     
     def _build_generation_prompt(self, context: Dict[str, str], target_words: int) -> str:
@@ -449,10 +436,10 @@ class ContentGenerationEngine:
 
 【输出要求】
 1. 直接输出正文内容，不要包含章节标题
-2. 确保内容紧扣大纲，事实准确，细节丰富
-3. 必须使用素材中的具体细节，禁止泛泛而谈
-4. 注重感官描写，让场景可感可知
-5. 段落之间过渡自然，逻辑清晰
+2. 内容紧扣本节任务，但不要写成提纲翻译稿
+3. 优先使用素材里最有辨识度的细节；素材不足时不要为了凑细节乱写
+4. 段落之间过渡自然，逻辑清晰，语言通顺
+5. 可以有文学性，但不要空泛抒情，不要套路化修辞
 6. 结尾自然收束，不要强行制造悬念
 """
 
@@ -583,11 +570,11 @@ class ContentGenerationEngine:
             {"role": "system", "content": "你是一位擅长细节描写作家。你痛恨模板化表达和空洞的辞藻。"},
             {"role": "user", "content": prompt}
         ]
-        
+
         expanded = await self.llm.complete(
             messages,
             temperature=0.65,
-            max_tokens=min(4000, max(1200, additional_words * 2)),
+            max_tokens=16384,
             stream=True,
         )
         return expanded.strip()
@@ -646,6 +633,9 @@ class IterativeGenerationLayer:
 
         # 章节元数据缓存（用于Data Agent）
         self._chapter_meta_cache: Dict[int, Dict] = {}
+        
+        # 按项目延迟初始化，避免梗概缓存串项目
+        self.summary_generator: Optional[ChapterSummaryGenerator] = None
     
     async def generate_chapter(
         self,
@@ -824,6 +814,30 @@ class IterativeGenerationLayer:
 
         # 每章生成后自动压缩上下文
         await self.llm._compact_context()
+        
+        # ========== Step 4: 生成章节梗概（用于保持跨章一致性） ==========
+        book_id = global_state.book_id if isinstance(global_state, EnhancedGlobalState) else str(global_state.get("book_id", "") or "")
+        if book_id:
+            self.summary_generator = get_summary_generator(self.llm, book_id=book_id)
+        
+        # 合并章节内容为完整文本
+        full_chapter_content = "\n\n".join([s.content for s in sections])
+        
+        # 生成梗概
+        if self.summary_generator:
+            chapter_summary = await self.summary_generator.generate_summary(
+                chapter_num=chapter_outline.order,
+                chapter_title=chapter_outline.title,
+                chapter_content=full_chapter_content,
+                time_range=f"{chapter_outline.time_period_start or ''}-{chapter_outline.time_period_end or ''}"
+            )
+            generated_chapter.metadata["chapter_summary"] = chapter_summary.summary
+            generated_chapter.metadata["key_characters"] = chapter_summary.key_characters
+            generated_chapter.metadata["character_relationships"] = chapter_summary.character_relationships
+            generated_chapter.metadata["time_range"] = chapter_summary.time_range
+            
+            logger.info(f"章节梗概生成完成: {len(chapter_summary.summary)}字, "
+                       f"关键人物: {list(chapter_summary.key_characters.keys())}")
 
         return generated_chapter
 

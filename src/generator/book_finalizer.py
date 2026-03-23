@@ -59,6 +59,7 @@ def clean_text(text):
     
     return text.strip()
 
+@dataclass
 
 class ChapterVersion:
     """章节版本信息"""

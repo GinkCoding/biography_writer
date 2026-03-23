@@ -16,7 +16,9 @@
 
 ```python
 import asyncio
+from pathlib import Path
 from src.engine import BiographyEngine
+from src.models import WritingStyle
 
 async def main():
     engine = BiographyEngine()
@@ -40,8 +42,29 @@ async def main():
 
     print(f"EPUB 文件: {exported['epub']}")
 
-asyncio.run(main())
+    asyncio.run(main())
 ```
+
+如果你是通过命令行创建项目，风格在初始化时指定：
+
+```bash
+# 查看可用风格
+python -m src styles
+
+# 初始化时指定风格
+python -m src init sample.txt --subject 传主姓名 --style literary
+```
+
+可选风格：
+- `literary`
+- `documentary`
+- `investigative`
+- `memoir`
+- `inspirational`
+
+说明：
+- 风格是在初始化项目时确定的
+- 已有项目想换风格，建议重新初始化后再生成
 
 ### 仅运行演示
 

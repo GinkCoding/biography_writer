@@ -226,8 +226,16 @@ class ConsistencyChecker(BaseChecker):
 
     def _dates_conflict(self, date1: str, date2: str) -> bool:
         """检查两个日期是否冲突（简化实现）"""
-        # 实际实现需要更复杂的逻辑
-        return False
+        if not date1 or not date2:
+            return False
+
+        normalized1 = self._parse_date(date1)
+        normalized2 = self._parse_date(date2)
+        if not normalized1 or not normalized2:
+            return False
+
+        # 当前实现按年份判断：同一事件在不同年份时视为冲突。
+        return normalized1 != normalized2
 
     def _check_location_consistency(
         self,

@@ -3,10 +3,10 @@
 # 模型配置
 model:
   provider: openai
-  api_key: ""
-  base_url: "https://coding.dashscope.aliyuncs.com/v1"
-  model: "qwen3.5-plus"
-  max_tokens: 32768
+  api_key: "sk-sp-KlWPf3T3TEOJYzofjY5lu78ekc6nr45pOn5ZrpFF9Xotez7k"
+  base_url: "https://api.lkeap.cloud.tencent.com/coding/v3"
+  model: "glm-5"
+  max_tokens: 16384
   temperature: 0.7
   top_p: 0.9
   request_timeout_seconds: 300
@@ -19,6 +19,24 @@ generation:
   sections_per_chapter: 4
   words_per_section: 500
   style: literary
+  
+# 迭代审核配置
+iterative_review:
+  enabled: true  # 是否启用迭代审核
+  max_rounds: 5  # 最大迭代轮次
+  pass_threshold: 90  # 通过阈值（分数>=此值且无严重问题）
+  thinking_enabled: true  # 评审阶段是否启用thinking（深度分析）
+  # 上下文动态加载策略
+  context_strategy:
+    early_chapters:  # 第1-3章
+      range: [1, 3]
+      previous_count: 2  # 前0-2章摘要
+    middle_chapters:  # 第4-6章
+      range: [4, 6]
+      previous_count: 3  # 前3章摘要
+    late_chapters:  # 第7章及以后
+      range: [7, 999]
+      previous_count: 5  # 前5章摘要
   
 # 路径配置
 paths:

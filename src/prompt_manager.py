@@ -213,7 +213,7 @@ class PromptManager:
             "concrete_detail": [
                 Example(
                     title="基于具体素材",
-                    content="1982年春天，陈国伟背着布包走进藤编厂（来源：素材3）。厂门口有棵老榕树，车间里是成捆的藤条和化学药剂的味道。门卫老头翻着登记簿说：'你就是那个手很巧的小子。'",
+                    content="1982年春天，陈国伟背着布包走进藤编厂。厂门口有棵老榕树，车间里是成捆的藤条和化学药剂的味道。门卫老头翻着登记簿说：'你就是那个手很巧的小子。'",
                     analysis="优点：具体时间、地点、对话、气味细节，都有来源支撑",
                     is_positive=True
                 ),
@@ -227,7 +227,7 @@ class PromptManager:
             "show_dont_tell": [
                 Example(
                     title="有言行支撑的心理",
-                    content="陈国伟站在厂门口，深吸一口气——那是藤条被水泡发后的清香，混合着汗味和机油味（来源：素材3）。他没有立即进去，而是在榕树下站了几分钟，把布包的带子攥紧了又松开。",
+                    content="陈国伟站在厂门口，深吸一口气——那是藤条被水泡发后的清香，混合着汗味和机油味。他没有立即进去，而是在榕树下站了几分钟，把布包的带子攥紧了又松开。",
                     analysis="优点：通过动作（吸气、攥带子）表现紧张，而非直接说'他很紧张'",
                     is_positive=True
                 ),
@@ -241,7 +241,7 @@ class PromptManager:
             "era_context": [
                 Example(
                     title="时代背景具体化",
-                    content="1984年，陈国伟第一次离开佛山去广州。那时候广州火车站很乱，他在流花湖那边倒腾服装，从石狮进货。没有营业执照，看到戴红袖箍的来抓，卷起包袱就跑（来源：素材2）。",
+                    content="1984年，陈国伟第一次离开佛山去广州。那时候广州火车站很乱，他在流花湖那边倒腾服装，从石狮进货。没有营业执照，看到戴红袖箍的来抓，卷起包袱就跑。",
                     analysis="优点：具体年份、地点、行为细节，而非'改革开放初期'的空泛描述",
                     is_positive=True
                 ),
@@ -284,47 +284,41 @@ class PromptManager:
         self._constraints_cache = {
             "general": [
                 Constraint(
-                    text="必须使用提供的采访素材中的具体细节：人名、地名、时间、对话、数字",
+                    text="人名、关系、时间、地点和事件先后不能与素材和前文冲突",
                     is_hard=True,
                     category="fact"
                 ),
                 Constraint(
-                    text="引用采访内容时，在括号中标注来源，如（来源：素材1）",
+                    text="重大事件不得凭空编造；素材不足时允许保守写法，但不能乱补精确细节",
                     is_hard=True,
                     category="fact"
                 ),
                 Constraint(
-                    text="不得编造未在素材中出现的具体人物、事件、地点",
+                    text="优先吸收素材中的具体细节，但不要把内部来源标记直接写进正文",
                     is_hard=True,
                     category="fact"
                 ),
                 Constraint(
-                    text="必须明确时间点，结合当时的社会背景",
+                    text="正文中不得出现占位符、提纲语句、编辑批注或AI口吻",
                     is_hard=True,
                     category="content"
                 ),
                 Constraint(
-                    text="每300字必须包含至少1个具体时间、地点、数字或人物对话",
-                    is_hard=True,
-                    category="content"
-                ),
-                Constraint(
-                    text="建议使用感官描写增强场景感",
+                    text="建议使用感官描写增强场景感，但服务于人物和场景，不要炫技",
                     is_hard=False,
                     category="style"
                 ),
                 Constraint(
-                    text="建议保持段落长度适中，避免过长段落",
+                    text="建议保持段落节奏有变化，避免整节都一个腔调",
                     is_hard=False,
                     category="style"
                 )
             ],
             "forbidden": [
-                Constraint(text="待补充、待完善、此处需要展开", is_hard=True, category="placeholder"),
-                Constraint(text="尘埃在光柱中飞舞、苦涩中带着回甘、命运的齿轮", is_hard=True, category="cliche"),
+                Constraint(text="待补充、待完善、此处需要展开、主旨运用、本段功能", is_hard=True, category="placeholder"),
+                Constraint(text="命运的齿轮、暴风雨前的宁静、真相伺机而动", is_hard=True, category="cliche"),
                 Constraint(text="那是一个特殊的年代、风云变幻、波澜壮阔", is_hard=True, category="vague"),
                 Constraint(text="我为您撰写、这是一个通用模板", is_hard=True, category="ai_exposure"),
-                Constraint(text="暴风雨前的宁静、真相伺机而动", is_hard=True, category="suspense"),
                 Constraint(text="陷入了沉思、百感交集、心中充满", is_hard=True, category="emotion_label"),
             ]
         }

@@ -16,10 +16,13 @@ from src.core.agents import (
 from src.core.facts_db import FactsDatabase
 from src.core.models import (
     MaterialEvaluation, BookOutline, ChapterOutline,
-    ReviewReport, RevisionHistory, GenerationConfig
+    ReviewReport, RevisionHistory, GenerationConfig, IterativeReviewConfig
 )
 from src.llm_client import LLMClient
 from src.core.vector_store import SimpleVectorStore
+from src.agents.chapter_quality_reviewer import (
+    ChapterQualityReviewer, ChapterRevisionAgent, ChapterQualityReport
+)
 
 
 @dataclass
@@ -58,6 +61,10 @@ class BiographyPipeline:
         self.repetition_checker = RepetitionChecker(self.llm, self.vector_store)
         self.literary_checker = LiteraryChecker(self.llm)
         self.quality_selector = QualitySelector(self.llm)
+
+        # 初始化章节质量评审Agent
+        self.chapter_quality_reviewer = ChapterQualityReviewer(self.llm)
+        self.chapter_revision_agent = ChapterRevisionAgent(self.llm)
 
     async def run(self, material_path: Path, output_dir: Path, target_words: int = 100000) -> Path:
         """
@@ -169,7 +176,7 @@ class BiographyPipeline:
             [{"role": "user", "content": prompt}],
             temperature=0.3,
             thinking=True,
-            max_tokens=4000,
+            max_tokens=16384,
             timeout=300
         )
 
@@ -302,7 +309,7 @@ class BiographyPipeline:
             [{"role": "user", "content": prompt}],
             temperature=temperature,
             thinking=True,
-            max_tokens=6000,
+            max_tokens=16384,
             timeout=600
         )
 
@@ -352,7 +359,7 @@ class BiographyPipeline:
         response = await self.llm.complete(
             [{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=1000
+            max_tokens=16384
         )
 
         result = json.loads(response)
@@ -392,7 +399,7 @@ JSON格式：
         response = await self.llm.complete(
             [{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=2000,
+            max_tokens=16384,
             timeout=120
         )
 
@@ -420,66 +427,118 @@ JSON格式：
     async def _generate_single_chapter(
         self, chapter: ChapterOutline, outline: BookOutline, state: PipelineState, chapter_num: int
     ) -> str:
-        """生成单章（含审核迭代）"""
+        """生成单章（含迭代审核）"""
 
-        # 准备前序摘要（最近3章）
-        previous_summaries = self._get_previous_summaries(state, 3)
+        # 获取迭代审核配置
+        iterative_config = self.config.iterative_review
+        
+        # 动态加载前文摘要（根据章节位置）
+        previous_count = iterative_config.get_previous_count(chapter_num)
+        previous_summaries = self._get_previous_summaries(state, previous_count)
+
+        # 获取人物小传（从评估报告中提取，或使用默认值）
+        character_profile = self._get_character_profile(state)
 
         # 初始生成
+        logger.info(f"      生成章节初稿...")
         content = await self._generate_chapter_draft(
             chapter, outline, state.material_path.read_text(encoding='utf-8'), previous_summaries
         )
 
-        # 迭代修订（最多5轮）
+        # 检查是否启用迭代审核
+        if not iterative_config.enabled:
+            logger.info(f"      迭代审核未启用，跳过审核流程")
+            # 保存章节
+            chapter_file = state.output_dir / "chapters" / f"{chapter_num:02d}_{chapter.title}.txt"
+            chapter_file.parent.mkdir(parents=True, exist_ok=True)
+            header = self._make_chapter_header(chapter, [])
+            chapter_file.write_text(header + "\n\n" + content, encoding='utf-8')
+            return content
+
+        # 迭代审核流程
         revision_history = []
-        max_rounds = 5
+        max_rounds = iterative_config.max_rounds
+        pass_threshold = iterative_config.pass_threshold
+        thinking_enabled = iterative_config.thinking_enabled
 
         for round_num in range(1, max_rounds + 1):
-            logger.info(f"      审核轮次 {round_num}/{max_rounds}")
+            logger.info(f"      第{round_num}轮迭代审核 (最多{max_rounds}轮)")
 
-            # 使用LLM分析人物关系（动态理解，取代硬编码规则）
-            logger.info("         分析人物关系...")
-            relationship_analyses = await self._analyze_person_relationships(content, chapter_num)
-
-            # 并行4维度审核（传入关系分析结果）
-            review = await self._parallel_review(
-                content, chapter, outline, state, previous_summaries, relationship_analyses
+            # === 评审阶段 ===
+            # 评审阶段启用 thinking（深度分析）
+            quality_report = await self.chapter_quality_reviewer.review(
+                chapter_content=content,
+                chapter_outline=chapter,
+                book_outline=outline,
+                character_profile=character_profile,
+                previous_summaries=previous_summaries,
+                chapter_num=chapter_num,
+                enable_thinking=thinking_enabled  # 评审阶段启用thinking
             )
 
-            if review.all_passed():
-                logger.info(f"      ✓ 全部通过")
-                break
-
-            # 检查质量退化
-            if len(revision_history) >= 2:
-                degradation = self._detect_degradation(revision_history, review)
-                if degradation:
-                    logger.warning(f"      ⚠ 检测到质量退化: {degradation['type']}")
-                    # 回滚到最佳版本
-                    best_version = max(revision_history, key=lambda x: x['quality_score'])
-                    content = best_version['content']
-                    break
-
-            # 累积式修订
-            content = await self._revise_chapter(
-                content, review, revision_history, chapter, outline
-            )
-
-            # 记录历史
+            # 记录本轮结果
             revision_history.append({
                 'round': round_num,
-                'review': review,
+                'report': quality_report,
                 'content': content,
-                'quality_score': review.calculate_score(),
                 'word_count': len(content)
             })
+
+            # === 终止条件检查 ===
+            # 1. 评分达标
+            score_met = quality_report.score >= pass_threshold
+            # 2. 无严重问题
+            no_critical = not quality_report.has_critical_issues()
+            
+            if score_met and no_critical:
+                logger.info(
+                    f"      ✓ 审核通过！评分{quality_report.score}>={pass_threshold}，"
+                    f"无严重问题（critical={quality_report.critical_issues}）"
+                )
+                break
+
+            # === 检查是否达到最大轮次 ===
+            if round_num >= max_rounds:
+                logger.warning(
+                    f"      ⚠ 达到最大轮次{max_rounds}，终止迭代。"
+                    f"当前评分{quality_report.score}，严重问题{quality_report.critical_issues}个"
+                )
+                break
+
+            # === 修改阶段 ===
+            logger.info(
+                f"      评分{quality_report.score}<{pass_threshold}或存在严重问题{quality_report.critical_issues}个，"
+                f"开始修订..."
+            )
+            
+            # 修改阶段关闭 thinking（快速生成）
+            content = await self.chapter_revision_agent.revise(
+                chapter_content=content,
+                quality_report=quality_report,
+                chapter_outline=chapter,
+                book_outline=outline,
+                character_profile=character_profile,
+                revision_round=round_num,
+                enable_thinking=False  # 修改阶段关闭thinking
+            )
+
+            # 更新前文摘要（使用修订后的内容）
+            if revision_history:
+                # 更新最新的前文摘要
+                previous_summaries = self._get_previous_summaries(
+                    state, previous_count, current_chapter={
+                        'order': chapter_num,
+                        'title': chapter.title,
+                        'content': content
+                    }
+                )
 
         # 保存章节
         chapter_file = state.output_dir / "chapters" / f"{chapter_num:02d}_{chapter.title}.txt"
         chapter_file.parent.mkdir(parents=True, exist_ok=True)
 
         # 添加章节头部信息
-        header = self._make_chapter_header(chapter, revision_history)
+        header = self._make_iterative_review_header(chapter, revision_history)
         chapter_file.write_text(header + "\n\n" + content, encoding='utf-8')
 
         # 更新向量存储（用于后续章节的重复检测）
@@ -559,7 +618,7 @@ JSON格式：
             [{"role": "user", "content": prompt}],
             temperature=0.6,
             thinking=True,
-            max_tokens=8000,
+            max_tokens=16384,
             timeout=900
         )
 
@@ -673,20 +732,99 @@ JSON格式：
             [{"role": "user", "content": prompt}],
             temperature=0.5,
             thinking=True,
-            max_tokens=8000,
+            max_tokens=16384,
             timeout=600
         )
 
         return response
 
-    def _get_previous_summaries(self, state: PipelineState, count: int) -> List[str]:
-        """获取前序章节摘要"""
+    def _get_previous_summaries(
+        self, state: PipelineState, count: int, current_chapter: Optional[Dict] = None
+    ) -> List[str]:
+        """
+        获取前序章节摘要
+
+        Args:
+            state: 流水线状态
+            count: 前文章数
+            current_chapter: 当前章节信息（用于迭代时更新摘要）
+
+        Returns:
+            前序章节摘要列表
+        """
         summaries = []
+        
+        # 获取已生成的章节摘要
         for ch in state.generated_chapters[-count:]:
             # 提取每章前500字作为摘要
             content = ch['content'][:500]
             summaries.append(f"《{ch['title']}》: {content}...")
+        
+        # 如果提供了当前章节，也加入摘要（用于迭代修订时）
+        if current_chapter and len(summaries) < count:
+            content = current_chapter['content'][:500]
+            summaries.append(f"《{current_chapter['title']}》: {content}...")
+        
         return summaries
+
+    def _get_character_profile(self, state: PipelineState) -> str:
+        """
+        获取人物小传
+
+        从评估报告或大纲中提取人物信息
+        """
+        # 优先从评估报告中提取
+        if state.evaluation and hasattr(state.evaluation, 'reasoning'):
+            # 尝试从评估推理中提取人物信息
+            reasoning = state.evaluation.reasoning
+            if '人物' in reasoning or '性格' in reasoning:
+                return reasoning[:2000]  # 限制长度
+        
+        # 从大纲中提取
+        if state.outline:
+            profile_parts = []
+            profile_parts.append(f"传主: {state.outline.subject_name}")
+            
+            # 从章节中提取关键人物信息
+            for chapter in state.outline.chapters[:3]:  # 只看前3章
+                for section in chapter.sections:
+                    if '人物' in section.content_summary or '性格' in section.content_summary:
+                        profile_parts.append(section.content_summary[:200])
+            
+            if len(profile_parts) > 1:
+                return "\n".join(profile_parts)
+        
+        # 默认返回
+        return f"传主: {state.outline.subject_name if state.outline else '未知'}"
+
+    def _make_iterative_review_header(self, chapter: ChapterOutline, history: List[Dict]) -> str:
+        """生成迭代审核章节头部信息"""
+        actual_words = len(history[-1]['content']) if history else 0
+        final_score = history[-1]['report'].score if history else 0
+        total_rounds = len(history)
+        
+        header = f"""{chapter.title}
+时间跨度: {chapter.time_range}
+目标字数: 约{chapter.target_words}字（参考值，允许±10%浮动）
+实际字数: 约{actual_words}字
+迭代审核轮次: {total_rounds}轮
+最终评分: {final_score}/100
+
+小节规划:
+"""
+        for s in chapter.sections:
+            header += f"- 第{s.order}节 [{s.section_type}]: {s.title}\n"
+        
+        # 添加迭代历史
+        if history:
+            header += "\n【迭代审核历史】\n"
+            for h in history:
+                report = h['report']
+                header += f"第{h['round']}轮: 评分{report.score}, "
+                header += f"严重{report.critical_issues}个, 主要{report.major_issues}个, 次要{report.minor_issues}个\n"
+        
+        header += "\n" + "="*60 + "\n"
+        return header
 
     def _make_chapter_header(self, chapter: ChapterOutline, history: List[Dict]) -> str:
         """生成章节头部信息"""

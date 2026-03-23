@@ -49,6 +49,13 @@ AI_PLACEHOLDER_PATTERNS = [
     r'示例段落',
     r'模板内容',
     r'占位符',
+    r'主旨运用\s*[：:]',
+    r'本段功能\s*[：:]',
+    r'段落功能\s*[：:]',
+    r'转场提示\s*[：:]',
+    r'写作提示\s*[：:]',
+    r'写作要求\s*[：:]',
+    r'本章任务\s*[：:]',
 ]
 
 # 模板化套话黑名单
@@ -821,7 +828,7 @@ class ConsistencyChecker:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=1800,
+                max_tokens=16384,
             )
             payload = self._extract_json_object(response)
             raw_claims = payload.get("claims", []) if isinstance(payload, dict) else []
@@ -1092,7 +1099,7 @@ class ConsistencyChecker:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=min(3200, 360 + 220 * len(claim_payloads)),
+                max_tokens=16384,
             )
             payload = self._extract_json_object(response)
             raw_results = payload.get("results", []) if isinstance(payload, dict) else []
@@ -1225,7 +1232,7 @@ class ConsistencyChecker:
                 violations.append({
                     "type": "人物一致性",
                     "description": f"发现未记录的人物: {', '.join(list(new_characters)[:3])}",
-                    "severity": "low"
+                    "severity": "high"
                 })
         
         return violations
@@ -2101,7 +2108,7 @@ class DualAgentReviewer:
         claim_text = str(claim_failure.get("claim_text", "")).strip()
         evidence_snippet = str(claim_failure.get("evidence_snippet", "")).strip()
         failure_reason = str(claim_failure.get("failure_reason", "")).strip()
-        max_tokens = 180 if compact_mode else 280
+        max_tokens = 16384
 
         if compact_mode:
             return self._force_claim_sentence_rewrite(
@@ -2391,7 +2398,7 @@ claim_id: {claim_id}
             ]
 
             # 提高temperature增加多样性
-            rewritten = await self.llm.complete(messages, temperature=0.65, max_tokens=2000)  # 降低幻觉风险)
+            rewritten = await self.llm.complete(messages, temperature=0.65, max_tokens=16384)  # 降低幻觉风险)
 
             # 验证重写后的内容
             new_section = GeneratedSection(
@@ -3009,12 +3016,23 @@ class ReviewOutputLayer:
                 )
                 if cross_chapter_issues:
                     logger.warning(f"发现 {len(cross_chapter_issues)} 个跨章节一致性问题")
-                    # 将问题记录到第一章
-                    if chapter.sections:
-                        for issue in cross_chapter_issues:
+                    chapter = await self._repair_cross_chapter_issues(
+                        chapter=chapter,
+                        previous_chapter=previous_chapter,
+                        chapter_context=chapter_context,
+                        issues=cross_chapter_issues,
+                    )
+
+                    # 再检查一次，仍有问题则保留记录并阻止视为完全通过
+                    remaining_issues = await self.cross_chapter_checker.check_cross_chapter_consistency(
+                        chapter, previous_chapter
+                    )
+                    if chapter.sections and remaining_issues:
+                        for issue in remaining_issues:
                             chapter.sections[0].issues.append(
                                 f"[跨章节] {issue.get('type')}: {issue.get('description')}"
                             )
+                        chapter.sections[0].facts_verified = False
 
                 # 生成或优化过渡段落
                 if not chapter.transition_paragraph or chapter.transition_paragraph.startswith("（本章完"):
@@ -3045,6 +3063,88 @@ class ReviewOutputLayer:
         if self.enable_version_selection and self.book_finalizer:
             self.add_chapter_version(chapter)
 
+        return chapter
+
+    async def _repair_cross_chapter_issues(
+        self,
+        chapter: GeneratedChapter,
+        previous_chapter: GeneratedChapter,
+        chapter_context: Dict[str, Any],
+        issues: List[Dict[str, Any]],
+    ) -> GeneratedChapter:
+        """跨章节严重问题优先做章节内局部修复，不轻易全书重写。"""
+        issue_lines = "\n".join(
+            f"- [{item.get('severity', 'medium')}] {item.get('type', '一致性')}: {item.get('description', '')}"
+            for item in issues
+        )
+        hard_facts = chapter_context.get("hard_facts", [])
+        hard_fact_text = "\n".join(f"- {fact}" for fact in hard_facts[:12]) if hard_facts else "（无额外硬事实）"
+        prompt = f"""请只修复当前章节中与前一章不一致的内容，保持文风、结构和大部分文字不变。
+
+【前一章结尾】
+{previous_chapter.full_content[-1800:]}
+
+【当前章节全文】
+{chapter.full_content}
+
+【必须修复的问题】
+{issue_lines}
+
+【硬事实守卫】
+{hard_fact_text}
+
+【修复原则】
+1. 只改动出现矛盾的句子或段落，能局部修就不要整章重写
+2. 人名、关系、时间链必须与前文一致
+3. 删除任何编辑批注、写作提示、提纲残留
+4. 不新增没有依据的大事件
+5. 直接输出修复后的整章正文，保留原有小节标题
+"""
+        try:
+            rewritten = await self.llm.complete(
+                [
+                    {"role": "system", "content": "你是一位严谨但克制的传记编辑，擅长做最小必要改动。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.25,
+                max_tokens=16384,
+            )
+            normalized = ContentCleaner.clean(rewritten)
+            if not normalized:
+                return chapter
+            chapter = self._replace_chapter_sections_from_text(chapter, normalized)
+        except Exception as exc:
+            logger.warning(f"跨章节局部修复失败: {exc}")
+        return chapter
+
+    def _replace_chapter_sections_from_text(
+        self,
+        chapter: GeneratedChapter,
+        rewritten_text: str,
+    ) -> GeneratedChapter:
+        """将整章修复文本按现有小节标题切回章节结构。"""
+        text = rewritten_text.strip()
+        for section in chapter.sections:
+            marker = f"## {section.title}"
+            if marker not in text:
+                continue
+        for index, section in enumerate(chapter.sections):
+            current_marker = f"## {section.title}"
+            start = text.find(current_marker)
+            if start < 0:
+                continue
+            start += len(current_marker)
+            next_start = len(text)
+            for next_section in chapter.sections[index + 1:]:
+                next_marker = f"## {next_section.title}"
+                pos = text.find(next_marker, start)
+                if pos >= 0:
+                    next_start = pos
+                    break
+            new_content = text[start:next_start].strip()
+            if new_content:
+                section.content = ContentCleaner.clean(new_content)
+                section.word_count = count_chinese_words(section.content)
         return chapter
 
     async def _run_six_dimension_review(

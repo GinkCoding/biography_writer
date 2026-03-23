@@ -72,7 +72,7 @@ class FactChecker:
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=3000,
+                max_tokens=16384,
                 timeout=60
             )
 
@@ -208,7 +208,7 @@ JSON格式：
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=3000,
+                max_tokens=16384,
                 timeout=60
             )
 
@@ -301,7 +301,7 @@ JSON格式：
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=3000,
+                max_tokens=16384,
                 timeout=60
             )
 
@@ -386,7 +386,7 @@ JSON格式：
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=3000,
+                max_tokens=16384,
                 timeout=60
             )
 
@@ -444,7 +444,7 @@ class QualitySelector:
             response = await self.llm.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=1000,
+                max_tokens=16384,
                 timeout=60
             )
 
